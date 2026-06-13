@@ -1,0 +1,38 @@
+from django.urls import path
+from .views import (
+    AdminKYCUpdateView,
+    AdminPendingKYCListView,
+    AdminUserListView,
+    ApprovedProviderListView,
+    ChangePasswordView,
+    HeartbeatView,
+    LoginView,
+    NotificationClearView,
+    NotificationListView,
+    NotificationReadView,
+    ProfileView,
+    ProviderKYCView,
+    ProviderProfileView,
+    RegisterView,
+    VerifyEmailCodeView,
+)
+from rest_framework_simplejwt.views import TokenRefreshView
+
+urlpatterns = [
+    path('register/', RegisterView.as_view(), name='register'),
+    path('login/', LoginView.as_view(), name='login'),
+    path('verify-email-code/', VerifyEmailCodeView.as_view(), name='verify-email-code'),
+    path('profile/', ProfileView.as_view(), name='profile'),
+    path('change-password/', ChangePasswordView.as_view(), name='change-password'),
+    path('heartbeat/', HeartbeatView.as_view(), name='heartbeat'),
+    path('notifications/', NotificationListView.as_view(), name='notifications'),
+    path('notifications/clear/', NotificationClearView.as_view(), name='notifications-clear'),
+    path('notifications/read/', NotificationReadView.as_view(), name='notifications-read'),
+    path('provider/profile/', ProviderProfileView.as_view(), name='provider-profile'),
+    path('provider/kyc/', ProviderKYCView.as_view(), name='provider-kyc'),
+    path('providers/', ApprovedProviderListView.as_view(), name='approved-providers'),
+    path('admin/users/', AdminUserListView.as_view(), name='admin-users'),
+    path('admin/kyc/', AdminPendingKYCListView.as_view(), name='admin-pending-kyc'),
+    path('admin/kyc/<int:provider_id>/', AdminKYCUpdateView.as_view(), name='admin-update-kyc'),
+    path('token/refresh/', TokenRefreshView.as_view(), name='token_refresh'),
+]

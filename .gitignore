@@ -1,0 +1,37 @@
+# Python / Django
+__pycache__/
+*.py[cod]
+*.sqlite3
+db.sqlite3
+.pytest_cache/
+
+# Virtual environments
+venv/
+.venv/
+env/
+
+# Local media and logs
+media/
+*.log
+server.out.log
+server.err.log
+
+# Environment variables / secrets
+.env
+.env.*
+!.env.example
+
+# Node / Expo
+node_modules/
+.expo/
+dist/
+web-build/
+npm-debug.*
+yarn-debug.*
+yarn-error.*
+
+# OS / editor
+.DS_Store
+Thumbs.db
+.vscode/
+

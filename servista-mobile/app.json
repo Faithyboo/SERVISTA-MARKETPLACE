@@ -1,0 +1,20 @@
+{
+  "expo": {
+    "name": "Servista",
+    "slug": "servista-mobile",
+    "version": "1.0.0",
+    "orientation": "portrait",
+    "userInterfaceStyle": "light",
+    "ios": {
+      "supportsTablet": true
+    },
+    "android": {
+      "adaptiveIcon": {
+        "backgroundColor": "#0F172A"
+      }
+    },
+    "plugins": [
+      "expo-font"
+    ]
+  }
+}
