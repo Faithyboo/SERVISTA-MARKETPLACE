@@ -1,5 +1,5 @@
 from rest_framework import serializers
-from .models import ProviderScore, ProviderReport, Review, BatchVerification
+from .models import ProviderScore, ProviderReport, Review, BatchVerification, AIAnalysisRun
 from django.contrib.auth import get_user_model
 
 User = get_user_model()
@@ -87,3 +87,13 @@ class BatchVerificationSerializer(serializers.ModelSerializer):
     class Meta:
         model = BatchVerification
         fields = '__all__'
+
+
+class AIAnalysisRunSerializer(serializers.ModelSerializer):
+    admin_name = serializers.CharField(source='admin.full_name', read_only=True)
+    action_label = serializers.CharField(source='get_action_display', read_only=True)
+
+    class Meta:
+        model = AIAnalysisRun
+        fields = ['id', 'admin', 'admin_name', 'action', 'action_label', 'snapshot', 'created_at']
+        read_only_fields = fields

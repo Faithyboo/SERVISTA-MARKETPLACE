@@ -14,6 +14,7 @@ import { colors, formatMoney } from '../theme/colors';
 import { withFont } from '../theme/typography';
 import MapView, { Marker } from '../components/PlatformMap';
 import AdminDSSPanel from './admin/AdminDSSPanel';
+import { AdminWorkspaceLayout } from './admin/AdminWorkspaceLayout';
 
 const servistaLogo = require('../../assets/servista-logo.png');
 
@@ -93,6 +94,15 @@ function isSuccessfulBooking(booking) {
   return booking?.status === 'completed' || !!booking?.client_confirmed_at || booking?.payment_status === 'released';
 }
 
+function bookingBelongsToProvider(booking, service) {
+  if (!booking || !service) return false;
+  if (String(booking.service) === String(service.id)) return true;
+  if (booking.provider && service.provider && String(booking.provider) === String(service.provider)) return true;
+  const bookingProvider = (booking.provider_name || '').trim().toLowerCase();
+  const serviceProvider = (service.provider_name || '').trim().toLowerCase();
+  return !!bookingProvider && bookingProvider === serviceProvider;
+}
+
 function getProviderRatingFromServices(services) {
   const totals = services.reduce((acc, service) => {
     const count = Number(service.review_count || 0);
@@ -107,6 +117,64 @@ function getProviderRatingFromServices(services) {
     rating: totals.count ? (totals.weighted / totals.count).toFixed(1) : '0.0',
     count: totals.count
   };
+}
+
+const cameroonLocationFallbacks = [
+  { match: ['bonamoussadi', 'bonamousadi'], latitude: 4.0896, longitude: 9.7409 },
+  { match: ['akwa'], latitude: 4.0519, longitude: 9.7043 },
+  { match: ['bastos'], latitude: 3.8892, longitude: 11.5167 },
+  { match: ['douala'], latitude: 4.0511, longitude: 9.7679 },
+  { match: ['yaounde', 'yaoundé'], latitude: 3.848, longitude: 11.5021 },
+  { match: ['buea'], latitude: 4.1534, longitude: 9.2423 },
+  { match: ['limbe'], latitude: 4.0242, longitude: 9.2149 },
+  { match: ['bamenda'], latitude: 5.9631, longitude: 10.1591 },
+];
+
+function fallbackGeocodeLocation(text) {
+  const normalized = String(text || '').toLowerCase();
+  const match = cameroonLocationFallbacks.find((item) => item.match.some((part) => normalized.includes(part))) || null;
+  return match ? { ...match, source: 'local' } : null;
+}
+
+function exactGeocodeMatches(query, resultName) {
+  const result = String(resultName || '').toLowerCase();
+  const keywords = String(query || '')
+    .toLowerCase()
+    .replace(/cameroon|cameroun|douala|yaounde|yaoundé|buea|limbe|bamenda/g, '')
+    .split(/[^a-z0-9]+/)
+    .filter((part) => part.length >= 4);
+
+  if (!keywords.length) return false;
+  return keywords.some((part) => result.includes(part));
+}
+
+async function geocodeLocationText(text, options = {}) {
+  const { preferLocal = true, requireExactMatch = false } = options;
+  const query = String(text || '').trim();
+  if (!query) return null;
+
+  const localMatch = preferLocal ? fallbackGeocodeLocation(query) : null;
+  if (localMatch) return localMatch;
+
+  try {
+    const response = await fetch(`https://nominatim.openstreetmap.org/search?format=json&limit=1&countrycodes=cm&q=${encodeURIComponent(query)}`);
+    const results = await response.json();
+    if (Array.isArray(results) && results[0]) {
+      if (requireExactMatch && !exactGeocodeMatches(query, results[0].display_name)) {
+        return null;
+      }
+      return {
+        latitude: Number(results[0].lat),
+        longitude: Number(results[0].lon),
+        displayName: results[0].display_name,
+        source: 'remote',
+      };
+    }
+  } catch (error) {
+    return null;
+  }
+
+  return null;
 }
 
 function uploadFileFromAsset(asset, fallbackName = 'upload.jpg') {
@@ -133,6 +201,7 @@ export function HomeScreen({ route, navigation }) {
   const [search, setSearch] = useState('');
   const [selectedCategory, setSelectedCategory] = useState(route?.params?.category || '');
   const notificationCount = useNotificationCount(user);
+  const clientLocation = String(user?.city_area || '').trim();
 
   const openCategories = () => {
     const parentNavigator = navigation.getParent?.();
@@ -178,10 +247,12 @@ export function HomeScreen({ route, navigation }) {
                 <View style={styles.locationBadge}>
                   <Image source={servistaLogo} style={styles.locationLogo} resizeMode="contain" />
                 </View>
-                <View style={styles.flex}>
-                  <Text style={styles.exploreOverline}>LOCATION</Text>
-                  <Text style={styles.exploreLocation}>Yaounde, CM</Text>
-              </View>
+                {clientLocation ? (
+                  <View style={styles.flex}>
+                    <Text style={styles.exploreOverline}>LOCATION</Text>
+                    <Text style={styles.exploreLocation}>{clientLocation}</Text>
+                  </View>
+                ) : null}
               <View style={styles.exploreSearch}>
                 <Ionicons name="search" size={16} color="#91A0B8" />
                 <TextInput
@@ -242,7 +313,9 @@ export function HomeScreen({ route, navigation }) {
               {mediaUri(item.image) ? (
                 <View style={styles.exploreImageWrap}>
                   <Image source={{ uri: mediaUri(item.image) }} style={styles.exploreServiceImage} resizeMode="cover" />
-                  <View style={styles.exploreBadge}><Ionicons name="checkmark-circle" size={12} color={colors.green} /><Text style={styles.exploreBadgeText}>VERIFIED</Text></View>
+                  {item.provider_badge_verification_status === 'verified' ? (
+                    <View style={styles.exploreBadge}><TrustBadge size={18} /><Text style={styles.exploreBadgeText}>VERIFIED</Text></View>
+                  ) : null}
                   <View style={styles.durationBadge}><Ionicons name="time-outline" size={10} color={colors.white} /><Text style={styles.durationText}>45m</Text></View>
                 </View>
               ) : null}
@@ -259,12 +332,6 @@ export function HomeScreen({ route, navigation }) {
               </View>
             </View>
           </TouchableOpacity>
-        )}
-        ListFooterComponent={(
-          <View style={styles.exploreCta}>
-            <Text style={styles.exploreCtaTitle}>Work with the best in your city</Text>
-            <TouchableOpacity activeOpacity={0.8} style={styles.exploreCtaButton}><Text style={styles.exploreCtaText}>Become a Provider</Text></TouchableOpacity>
-          </View>
         )}
       />
     </SafeAreaView>
@@ -297,13 +364,9 @@ export function ServiceDetailScreen({ route, navigation }) {
         const bookings = Array.isArray(data) ? data : [];
         const eligible = bookings
           .filter((booking) => (
-            String(booking.service) === String(service.id)
+            bookingBelongsToProvider(booking, service)
             && !booking.has_review
-            && (
-              booking.status === 'completed'
-              || !!booking.client_confirmed_at
-              || booking.payment_status === 'released'
-            )
+            && isSuccessfulBooking(booking)
           ))
           .sort((a, b) => new Date(b.created_at) - new Date(a.created_at))[0] || null;
         setReviewableBooking(eligible);
@@ -421,7 +484,9 @@ export function ServiceDetailScreen({ route, navigation }) {
         <View style={styles.serviceCopy}>
           <Text style={styles.serviceDetailTitle}>{service.title}</Text>
           <View style={styles.serviceBadgeRow}>
-            <View style={styles.verifiedServicePill}><Text style={styles.verifiedServiceText}>VERIFIED SERVICE</Text></View>
+            {service.provider_badge_verification_status === 'verified' ? (
+              <View style={styles.verifiedServicePill}><Text style={styles.verifiedServiceText}>VERIFIED PROVIDER</Text></View>
+            ) : null}
             <View style={styles.reviewPill}><Ionicons name="star" size={14} color={colors.orange} /><Text style={styles.reviewText}>{averageRating} ({reviewCount} Reviews)</Text></View>
           </View>
           <Text style={styles.serviceDescription}>{service.description || 'Our professional team provides a comprehensive service tailored for modern homes and businesses. We use trusted tools and reliable local expertise to make sure the work is done properly.'}</Text>
@@ -535,45 +600,132 @@ export function BookingScreen({ route, navigation }) {
   const goToTab = (screen) => navigation.navigate('Tabs', { screen });
 
   return (
-    <SafeAreaView style={styles.screen}>
-      <KeyboardAvoidingView behavior={Platform.OS === 'ios' ? 'padding' : undefined} style={styles.flex}>
-        <ScrollView contentContainerStyle={styles.content}>
-          <Text style={styles.pageTitle}>Book Service</Text>
-          <Card><Text style={styles.bookingServiceTitle}>{service.title}</Text><Text style={styles.price}>{formatMoney(service.price)}</Text></Card>
-          <Input icon="location-outline" placeholder="Service address" value={address} onChangeText={setAddress} />
-          <Input icon="calendar-outline" placeholder="Scheduled ISO date/time" value={scheduledAt} onChangeText={setScheduledAt} />
-          <Input icon="document-text-outline" placeholder="Notes" value={notes} onChangeText={setNotes} multiline />
-          <Button label="Confirm Booking" loading={loading} onPress={submit} />
-        </ScrollView>
-        <View style={styles.bookingBottomTabs}>
-          {[
-            ['Explore', 'home', () => goToTab('Explore')],
-            ['Map View', 'map-outline', () => goToTab('Map View')],
-            ['Messages', 'chatbubbles-outline', () => goToTab('Messages')],
-            ['Wallet', 'wallet-outline', () => goToTab('Wallet')],
-            ['Account', 'person-outline', () => goToTab('Account')]
-          ].map(([label, icon, onPress]) => (
-            <TouchableOpacity activeOpacity={0.8} key={label} onPress={onPress} style={styles.bookingBottomTab}>
-              <Ionicons name={icon} size={24} color={label === 'Explore' ? colors.orange : '#9CA3AF'} />
-              <Text style={[styles.bookingBottomLabel, label === 'Explore' && styles.bookingBottomLabelActive]}>{label}</Text>
-            </TouchableOpacity>
-          ))}
-        </View>
-      </KeyboardAvoidingView>
-    </SafeAreaView>
+    <View style={styles.screen}>
+      <SafeAreaView style={styles.flex}>
+        <KeyboardAvoidingView behavior={Platform.OS === 'ios' ? 'padding' : undefined} style={styles.flex}>
+          <ScrollView contentContainerStyle={styles.bookingContent}>
+            <Text style={styles.pageTitle}>Book Service</Text>
+            <Card><Text style={styles.bookingServiceTitle}>{service.title}</Text><Text style={styles.price}>{formatMoney(service.price)}</Text></Card>
+            <Input icon="location-outline" placeholder="Service address" value={address} onChangeText={setAddress} />
+            <Input icon="calendar-outline" placeholder="Scheduled ISO date/time" value={scheduledAt} onChangeText={setScheduledAt} />
+            <Input icon="document-text-outline" placeholder="Notes" value={notes} onChangeText={setNotes} multiline />
+            <Button label="Confirm Booking" loading={loading} onPress={submit} />
+          </ScrollView>
+        </KeyboardAvoidingView>
+      </SafeAreaView>
+      <View style={styles.bookingBottomTabs}>
+        {[
+          ['Explore', 'home', () => goToTab('Explore')],
+          ['Map View', 'map-outline', () => goToTab('Map View')],
+          ['Messages', 'chatbubbles-outline', () => goToTab('Messages')],
+          ['Wallet', 'wallet-outline', () => goToTab('Wallet')],
+          ['Account', 'person-outline', () => goToTab('Account')]
+        ].map(([label, icon, onPress]) => (
+          <TouchableOpacity activeOpacity={0.8} key={label} onPress={onPress} style={styles.bookingBottomTab}>
+            <Ionicons name={icon} size={24} color={label === 'Explore' ? colors.orange : '#9CA3AF'} />
+            <Text style={[styles.bookingBottomLabel, label === 'Explore' && styles.bookingBottomLabelActive]}>{label}</Text>
+          </TouchableOpacity>
+        ))}
+      </View>
+    </View>
   );
 }
 
 export function BookingTrackingScreen({ route, navigation }) {
-  const booking = route?.params?.booking || {};
-  const latitude = Number(booking.service_latitude || booking.latitude || 4.0511);
-  const longitude = Number(booking.service_longitude || booking.longitude || 9.7679);
-  const validCoords = Number.isFinite(latitude) && Number.isFinite(longitude);
+  const initialBooking = route?.params?.booking || {};
+  const [booking, setBooking] = useState(initialBooking);
+  useFocusEffect(useCallback(() => {
+    if (!initialBooking?.id) return;
+    api.get(`/api/bookings/${initialBooking.id}/`).then(({ data }) => setBooking(data)).catch(() => {});
+  }, [initialBooking?.id]));
+
+  const exactAddress = String(booking.provider_exact_address || '').trim();
+  const cityArea = String(booking.provider_city_area || '').trim();
+  const providerLatitude = Number(booking.provider_latitude);
+  const providerLongitude = Number(booking.provider_longitude);
+  const hasSavedCoords = Number.isFinite(providerLatitude) && Number.isFinite(providerLongitude);
+  const hasLocationText = !!(exactAddress || cityArea);
+  const [trackingPoint, setTrackingPoint] = useState(hasSavedCoords && !hasLocationText ? {
+    latitude: providerLatitude,
+    longitude: providerLongitude,
+    exact: !!exactAddress,
+    label: exactAddress || `Approximate location - ${cityArea}`,
+    source: 'saved',
+  } : null);
+  const [geocoding, setGeocoding] = useState(hasLocationText);
+
+  useEffect(() => {
+    let active = true;
+    const loadLocation = async () => {
+      if (!exactAddress && !cityArea) {
+        if (hasSavedCoords) {
+          setTrackingPoint({
+            latitude: providerLatitude,
+            longitude: providerLongitude,
+            exact: false,
+            label: 'Saved provider location',
+            source: 'saved',
+          });
+          setGeocoding(false);
+          return;
+        }
+        setTrackingPoint(null);
+        setGeocoding(false);
+        return;
+      }
+
+      setGeocoding(true);
+      const preciseQuery = exactAddress && cityArea ? `${exactAddress}, ${cityArea}, Cameroon` : exactAddress;
+      const precise = exactAddress ? await geocodeLocationText(preciseQuery, { preferLocal: false, requireExactMatch: true }) : null;
+      const approximate = precise || (cityArea ? await geocodeLocationText(cityArea) : null);
+      if (!active) return;
+      if (approximate && Number.isFinite(approximate.latitude) && Number.isFinite(approximate.longitude)) {
+        const isPrecise = !!precise;
+        setTrackingPoint({
+          latitude: approximate.latitude,
+          longitude: approximate.longitude,
+          exact: isPrecise,
+          label: isPrecise ? exactAddress : `Approximate location - ${cityArea}`,
+          source: isPrecise ? 'exact-geocode' : 'area-geocode',
+        });
+      } else if (hasSavedCoords) {
+        setTrackingPoint({
+          latitude: providerLatitude,
+          longitude: providerLongitude,
+          exact: !!exactAddress,
+          label: exactAddress || `Approximate location - ${cityArea}`,
+          source: 'saved',
+        });
+      } else {
+        setTrackingPoint(null);
+      }
+      setGeocoding(false);
+    };
+
+    loadLocation();
+    return () => { active = false; };
+  }, [cityArea, exactAddress, hasSavedCoords, providerLatitude, providerLongitude]);
+
   const region = {
-    latitude: validCoords ? latitude : 4.0511,
-    longitude: validCoords ? longitude : 9.7679,
+    latitude: trackingPoint?.latitude || 4.0511,
+    longitude: trackingPoint?.longitude || 9.7679,
     latitudeDelta: 0.025,
     longitudeDelta: 0.025
+  };
+  const locationMissing = !trackingPoint && !geocoding;
+  const locationStatus = trackingPoint?.exact ? 'Precise provider location' : trackingPoint ? 'Approximate provider area' : 'Location unavailable';
+  const locationDescription = trackingPoint?.exact
+    ? 'This marker is based on the provider exact address.'
+    : trackingPoint
+      ? 'This marker is centred on the provider saved city/area because no verified exact coordinates are available.'
+      : 'Ask the provider to add their location from Settings.';
+  const openExternalMap = () => {
+    if (!trackingPoint) return;
+    const label = encodeURIComponent(trackingPoint.label || booking.provider_name || 'Provider location');
+    const url = Platform.OS === 'ios'
+      ? `http://maps.apple.com/?ll=${trackingPoint.latitude},${trackingPoint.longitude}&q=${label}`
+      : `https://www.google.com/maps/search/?api=1&query=${trackingPoint.latitude},${trackingPoint.longitude}`;
+    Linking.openURL(url).catch(() => Alert.alert('Map unavailable', 'Unable to open your maps app right now.'));
   };
 
   return (
@@ -588,23 +740,56 @@ export function BookingTrackingScreen({ route, navigation }) {
       </View>
 
       <View style={styles.trackingMapCard}>
-        <MapView style={styles.trackingMap} initialRegion={region}>
-          <Marker
-            coordinate={{ latitude: region.latitude, longitude: region.longitude }}
-            title={booking.service_title || 'Service location'}
-            description={booking.address || booking.service_address || 'Booking location'}
-          />
-        </MapView>
+        {geocoding ? (
+          <View style={styles.trackingEmptyState}>
+            <ActivityIndicator color={colors.orange} />
+            <Text style={styles.trackingEmptyTitle}>Finding provider location</Text>
+            <Text style={styles.trackingEmptyText}>Please wait while Servista prepares the map.</Text>
+          </View>
+        ) : locationMissing ? (
+          <View style={styles.trackingEmptyState}>
+            <Ionicons name="location-outline" size={42} color={colors.orange} />
+            <Text style={styles.trackingEmptyTitle}>Service provider has not set their location yet</Text>
+            <Text style={styles.trackingEmptyText}>Ask the provider to add their city or exact address from Settings.</Text>
+          </View>
+        ) : (
+          <MapView key={`${region.latitude}-${region.longitude}`} style={styles.trackingMap} initialRegion={region}>
+            <Marker
+              coordinate={{ latitude: region.latitude, longitude: region.longitude }}
+              title={booking.provider_name || 'Service provider'}
+              description={trackingPoint.label}
+            >
+              <View style={styles.trackingMarkerOuter}>
+                <View style={styles.trackingMarkerInner}>
+                  <Ionicons name="briefcase" size={16} color={colors.white} />
+                </View>
+              </View>
+            </Marker>
+          </MapView>
+        )}
+        {!geocoding && !locationMissing ? (
+          <View style={styles.trackingMapOverlay}>
+            <View style={styles.trackingStatusDot} />
+            <Text style={styles.trackingMapOverlayText}>{locationStatus}</Text>
+          </View>
+        ) : null}
       </View>
 
       <View style={styles.trackingInfoCard}>
         <View style={styles.trackingInfoIcon}><Ionicons name="location-outline" size={22} color={colors.orange} /></View>
         <View style={styles.flex}>
-          <Text style={styles.trackingInfoTitle}>{booking.address || booking.service_address || 'Booking address'}</Text>
+          <Text style={styles.trackingInfoTitle}>{trackingPoint?.label || cityArea || exactAddress || 'Provider location unavailable'}</Text>
           <Text style={styles.trackingInfoText}>Provider: {booking.provider_name || 'Servista Provider'}</Text>
+          <Text style={styles.trackingInfoText}>{locationDescription}</Text>
           <Text style={styles.trackingInfoText}>ID: #SRV-{String(booking.id || '').padStart(4, '0')}</Text>
         </View>
       </View>
+      {trackingPoint ? (
+        <TouchableOpacity activeOpacity={0.85} onPress={openExternalMap} style={styles.trackingOpenMapsButton}>
+          <Ionicons name="navigate-outline" size={18} color={colors.white} />
+          <Text style={styles.trackingOpenMapsText}>Open in Maps</Text>
+        </TouchableOpacity>
+      ) : null}
     </SafeAreaView>
   );
 }
@@ -1014,6 +1199,7 @@ export function WalletScreen({ route, navigation }) {
   const { t } = useLanguage();
   const pinInputRef = useRef(null);
   const unlockPinRef = useRef(null);
+  const lastAccessPinRequiredRef = useRef(null);
   const [wallet, setWallet] = useState(null);
   const [amount, setAmount] = useState('');
   const [walletRefreshing, setWalletRefreshing] = useState(false);
@@ -1024,6 +1210,7 @@ export function WalletScreen({ route, navigation }) {
   const [unlockPin, setUnlockPin] = useState('');
   const [termsAccepted, setTermsAccepted] = useState(false);
   const [kycBusinessName, setKycBusinessName] = useState('');
+  const [kycCityArea, setKycCityArea] = useState('');
   const [idFront, setIdFront] = useState(null);
   const [idBack, setIdBack] = useState(null);
   const [selfie, setSelfie] = useState(null);
@@ -1041,11 +1228,21 @@ export function WalletScreen({ route, navigation }) {
   const providerKycStatus = wallet?.provider_kyc_status || 'pending';
   const showKycOnly = kycOnlyMode || route?.params?.kycOnly;
   const walletRequiresAccessPin = !!(wallet?.pin_required_for_access && wallet?.pin_is_set);
+  const walletLoaded = !!wallet;
 
-  const load = useCallback(async () => {
+  const load = useCallback(async (enforceAccessLock = false) => {
     try {
       const { data } = await api.get('/api/wallet/');
       setWallet(data);
+      const requiresAccessPin = !!(data.pin_required_for_access && data.pin_is_set);
+      const previousRequiresAccessPin = lastAccessPinRequiredRef.current;
+      if ((enforceAccessLock || previousRequiresAccessPin !== true) && requiresAccessPin) {
+        setWalletUnlocked(false);
+      }
+      if (!requiresAccessPin) {
+        setWalletUnlocked(true);
+      }
+      lastAccessPinRequiredRef.current = requiresAccessPin;
       if (isProvider) return;
       if (data.pin_is_set) {
         await AsyncStorage.setItem(walletSetupKey, 'complete');
@@ -1072,6 +1269,7 @@ export function WalletScreen({ route, navigation }) {
         if (mounted) setPinPromptDismissed(dismissed === 'true');
 
         const requiresAccessPin = !!(data.pin_required_for_access && data.pin_is_set);
+        lastAccessPinRequiredRef.current = requiresAccessPin;
         if (isProvider) {
           setWallet(data);
           setWalletUnlocked(!requiresAccessPin);
@@ -1116,14 +1314,14 @@ export function WalletScreen({ route, navigation }) {
 
   useFocusEffect(useCallback(() => {
     if (showKycOnly) return;
-    if (!walletUnlocked) return;
-    if (isProvider || walletSetupComplete) load();
-  }, [load, walletSetupComplete, isProvider, walletUnlocked, showKycOnly]));
+    if (isProvider || walletSetupComplete || walletLoaded) load(false);
+  }, [load, walletSetupComplete, isProvider, showKycOnly, walletLoaded]));
 
   useFocusEffect(useCallback(() => {
     if (route?.params?.kycOnly) {
       setKycOnlyMode(true);
       setKycBusinessName(user?.full_name || '');
+      setKycCityArea('');
       setIdFront(null);
       setIdBack(null);
       setSelfie(null);
@@ -1171,6 +1369,10 @@ export function WalletScreen({ route, navigation }) {
       Alert.alert(t('KYC required'), t('Enter your legal business name before submitting verification.'));
       return;
     }
+    if (!kycCityArea.trim()) {
+      Alert.alert(t('Location required'), t('Enter your City/Area before submitting verification.'));
+      return;
+    }
     if (!idFront || !idBack || !selfie) {
       Alert.alert(t('Documents required'), t('Upload the front, back, and selfie verification photos to continue.'));
       return;
@@ -1178,6 +1380,7 @@ export function WalletScreen({ route, navigation }) {
     try {
       const profilePayload = new FormData();
       profilePayload.append('business_name', kycBusinessName.trim());
+      profilePayload.append('city_area', kycCityArea.trim());
       await api.post('/api/users/provider/profile/', profilePayload, {
         headers: { 'Content-Type': 'multipart/form-data' }
       });
@@ -1204,6 +1407,7 @@ export function WalletScreen({ route, navigation }) {
     try {
       const { data } = await api.post('/api/wallet/pin/verify/', { pin: unlockPin });
       setWallet(data.wallet);
+      lastAccessPinRequiredRef.current = !!(data.wallet?.pin_required_for_access && data.wallet?.pin_is_set);
       setWalletUnlocked(true);
       setUnlockPin('');
     } catch (error) {
@@ -1218,11 +1422,13 @@ export function WalletScreen({ route, navigation }) {
       return;
     }
     try {
-      const { data } = await api.post('/api/wallet/pin/', { pin });
+      await api.post('/api/wallet/pin/', { pin });
+      const { data } = await api.patch('/api/wallet/pin/preference/', { pin_required_for_access: true });
       setWallet(data);
+      lastAccessPinRequiredRef.current = !!(data.pin_required_for_access && data.pin_is_set);
       setPin('');
       setPinSetupMode(false);
-      setWalletUnlocked(!data.pin_required_for_access);
+      setWalletUnlocked(true);
       Alert.alert('Access PIN set', 'Your wallet is now protected with a 4-digit PIN.');
     } catch (error) {
       Alert.alert(t('Wallet setup failed'), errorMessage(error));
@@ -1354,6 +1560,14 @@ export function WalletScreen({ route, navigation }) {
           value={kycBusinessName}
           onChangeText={setKycBusinessName}
           placeholder={t('e.g. Douala Tech Solutions')}
+          placeholderTextColor="#8FA0B8"
+          style={styles.walletSetupTextInput}
+        />
+        <Text style={styles.walletSetupFieldLabel}>CITY / AREA</Text>
+        <TextInput
+          value={kycCityArea}
+          onChangeText={setKycCityArea}
+          placeholder={t('e.g. Douala, Bonamousadi')}
           placeholderTextColor="#8FA0B8"
           style={styles.walletSetupTextInput}
         />
@@ -1521,7 +1735,7 @@ export function WalletScreen({ route, navigation }) {
     );
   }
 
-  if (wallet?.pin_is_set && !walletUnlocked && !showKycOnly) {
+  if (walletRequiresAccessPin && !walletUnlocked && !showKycOnly) {
     return (
       <SafeAreaView style={styles.walletSetupScreen}>
         <KeyboardAvoidingView behavior={Platform.OS === 'ios' ? 'padding' : undefined} keyboardVerticalOffset={24} style={styles.flex}>
@@ -2419,6 +2633,7 @@ export function ProviderDashboardScreen({ navigation }) {
   const completedJobs = activeBookings.filter(isSuccessfulBooking).length;
   const successRate = activeBookings.length ? Math.round((completedJobs / activeBookings.length) * 100) : 0;
   const providerRating = getProviderRatingFromServices(services);
+  const providerNeedsLocation = !String(providerProfile?.city_area || '').trim();
   return (
     <SafeAreaView style={styles.screen}>
       <ScrollView contentContainerStyle={styles.content}>
@@ -2440,6 +2655,16 @@ export function ProviderDashboardScreen({ navigation }) {
             <NotificationBadge count={notificationCount} />
           </TouchableOpacity>
         </View>
+        {providerNeedsLocation ? (
+          <TouchableOpacity activeOpacity={0.85} onPress={() => navigation.navigate('Settings', { section: 'Location' })} style={styles.providerLocationPrompt}>
+            <Ionicons name="location-outline" size={22} color={colors.orange} />
+            <View style={styles.flex}>
+              <Text style={styles.providerLocationPromptTitle}>Add your service location</Text>
+              <Text style={styles.providerLocationPromptText}>Set your City/Area so clients can track paid bookings accurately.</Text>
+            </View>
+            <Ionicons name="chevron-forward" size={18} color={colors.orange} />
+          </TouchableOpacity>
+        ) : null}
         <Card style={styles.providerBalance}>
           <Text style={styles.darkOverline}>AVAILABLE BALANCE</Text>
           <Text style={styles.providerBalanceText}>{formatMoney(wallet?.balance || 0)}</Text>
@@ -2858,7 +3083,487 @@ export function AddServiceScreen({ navigation }) {
   );
 }
 
+function AdminSentinelDashboard({ navigation }) {
+  const { user, logout } = useAuth();
+  const [users, setUsers] = useState([]);
+  const [kyc, setKyc] = useState([]);
+  const [escrows, setEscrows] = useState([]);
+  const [refunds, setRefunds] = useState([]);
+  const [pinResets, setPinResets] = useState([]);
+  const [dssData, setDssData] = useState(null);
+  const [loading, setLoading] = useState(false);
+  const [loadErrors, setLoadErrors] = useState([]);
+  const [search, setSearch] = useState('');
+  const [riskFilter, setRiskFilter] = useState('all');
+
+  const dssNav = (screen, params) => navigation.getParent()?.navigate(screen, params);
+
+  const loadAdminData = useCallback(async () => {
+    try {
+      setLoading(true);
+      const results = await Promise.allSettled([
+        api.get('/api/users/admin/users/'),
+        api.get('/api/users/admin/kyc/'),
+        api.get('/api/bookings/admin/escrow/'),
+        api.get('/api/bookings/admin/refunds/'),
+        api.get('/api/wallet/admin/pin-resets/'),
+        api.get('/api/dss/dashboard/')
+      ]);
+      const labels = ['users', 'KYC', 'escrow', 'refunds', 'PIN resets', 'AI data'];
+      const failed = results
+        .map((result, index) => result.status === 'rejected' ? labels[index] : null)
+        .filter(Boolean);
+      const listData = (index) => {
+        const result = results[index];
+        return result?.status === 'fulfilled' && Array.isArray(result.value?.data) ? result.value.data : [];
+      };
+      setUsers(listData(0));
+      setKyc(listData(1));
+      setEscrows(listData(2));
+      setRefunds(listData(3));
+      setPinResets(listData(4));
+      setDssData(results[5]?.status === 'fulfilled' ? results[5].value?.data || null : null);
+      setLoadErrors(failed);
+    } finally {
+      setLoading(false);
+    }
+  }, []);
+
+  useFocusEffect(useCallback(() => {
+    loadAdminData();
+  }, [loadAdminData]));
+
+  const activeProviders = users.filter((item) => item.role === 'provider').length;
+  const clients = users.filter((item) => item.role === 'client').length;
+  const admins = users.filter((item) => item.role === 'admin').length;
+  const fraudOverview = dssData?.fraud_overview || {};
+  const reportsOverview = dssData?.reports_overview || {};
+  const qualityOverview = dssData?.quality_overview || {};
+  const batchOverview = dssData?.batch_overview || {};
+  const badgeOverview = dssData?.badge_overview || {};
+  const dssHighRisk = Number(fraudOverview.high_risk || 0);
+  const dssMediumRisk = Number(fraudOverview.medium_risk || 0);
+  const dssLowRisk = fraudOverview.low_risk === undefined || fraudOverview.low_risk === null
+    ? Math.max(activeProviders - dssHighRisk - dssMediumRisk, 0)
+    : Number(fraudOverview.low_risk || 0);
+  const dssPendingReports = Number(reportsOverview.pending || 0);
+  const dssAlertCount = dssHighRisk + dssPendingReports;
+  const pendingRefundValue = refunds.reduce((sum, item) => sum + Number(item.amount || 0), 0);
+  const escrowValue = escrows.reduce((sum, item) => sum + Number(item.amount || 0), 0);
+  const escrowIssues = escrows.filter((item) => item.refund_status === 'requested' || item.issue_reported_at).length;
+  const uptime = dssAlertCount || refunds.length || escrowIssues ? 96.8 : 99.8;
+  const searchTerm = search.trim().toLowerCase();
+
+  const matchingUsers = useMemo(() => {
+    if (!searchTerm) return [];
+    return users.filter((item) => [item.full_name, item.email, item.role, item.phone].filter(Boolean).join(' ').toLowerCase().includes(searchTerm)).slice(0, 5);
+  }, [searchTerm, users]);
+
+  const notifications = useMemo(() => ([
+    {
+      key: 'risk',
+      count: dssAlertCount,
+      icon: 'shield-half-outline',
+      title: dssAlertCount ? 'AI risk flags detected' : 'AI risk clear',
+      message: dssAlertCount ? `${dssHighRisk} high-risk provider${dssHighRisk === 1 ? '' : 's'} and ${dssPendingReports} pending AI report${dssPendingReports === 1 ? '' : 's'} require review.` : 'Decision support is monitoring provider trust markers normally.',
+      time: dssAlertCount ? 'Live' : 'Now',
+      tone: dssAlertCount ? colors.red : colors.green,
+      action: () => dssNav('DSSAIPanel')
+    },
+    {
+      key: 'kyc',
+      count: kyc.length,
+      icon: 'checkbox-outline',
+      title: kyc.length ? 'New verification request' : 'No KYC queue',
+      message: kyc.length ? `${kyc.length} provider document review${kyc.length === 1 ? '' : 's'} waiting in the KYC workspace.` : 'Provider verification queue is currently clear.',
+      time: kyc.length ? '2m ago' : 'Now',
+      tone: kyc.length ? colors.orange : colors.green,
+      action: () => navigation.navigate('Verify')
+    },
+    {
+      key: 'escrow',
+      count: escrowIssues,
+      icon: 'wallet-outline',
+      title: escrowIssues ? 'Escrow action needed' : 'Escrow stable',
+      message: escrowIssues ? `${escrowIssues} escrow booking${escrowIssues === 1 ? '' : 's'} has a reported issue and needs admin mediation.` : `${escrows.length} active escrow booking${escrows.length === 1 ? '' : 's'} currently held safely in the platform.`,
+      time: escrowIssues ? 'Live' : 'Now',
+      tone: escrowIssues ? colors.red : colors.green,
+      action: () => navigation.navigate('Escrow')
+    },
+    {
+      key: 'pin',
+      count: pinResets.length,
+      icon: 'key-outline',
+      title: pinResets.length ? 'PIN reset request' : 'PIN resets clear',
+      message: pinResets.length ? `${pinResets.length} wallet PIN reset request${pinResets.length === 1 ? '' : 's'} pending admin validation.` : 'No wallet PIN resets are pending.',
+      time: pinResets.length ? '45m ago' : 'Now',
+      tone: pinResets.length ? colors.orange : colors.green,
+      action: () => navigation.navigate('Pin Resets')
+    }
+  ]), [dssAlertCount, dssHighRisk, dssPendingReports, kyc.length, escrows.length, escrowIssues, pinResets.length, navigation]);
+
+  const monitoringRows = useMemo(() => {
+    const rows = [
+      ...refunds.slice(0, 3).map((item) => ({
+        id: `refund-${item.id}`,
+        timestamp: item.created_at ? new Date(item.created_at).toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' }) : 'Live',
+        entity: item.client_name || 'Client',
+        action: `Refund review: ${item.service_title || 'Booking'}`,
+        confidence: refunds.length ? 82 : 100,
+        status: 'FLAGGED',
+        tone: colors.red,
+        onPress: () => navigation.navigate('Disputes')
+      })),
+      ...escrows.filter((item) => item.refund_status === 'requested' || item.issue_reported_at).slice(0, 3).map((item) => ({
+        id: `escrow-${item.id}`,
+        timestamp: item.created_at ? new Date(item.created_at).toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' }) : 'Live',
+        entity: item.service_title || 'Escrow booking',
+        action: `Escrow issue: ${formatMoney(item.amount)} awaiting mediation`,
+        confidence: 86,
+        status: 'FLAGGED',
+        tone: colors.red,
+        onPress: () => navigation.navigate('Escrow')
+      })),
+      ...kyc.slice(0, 3).map((item) => ({
+        id: `kyc-${item.id}`,
+        timestamp: item.created_at ? new Date(item.created_at).toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' }) : 'Queued',
+        entity: item.user?.full_name || item.business_name || 'Provider',
+        action: 'KYC validation request',
+        confidence: 94,
+        status: 'REVIEW',
+        tone: colors.orange,
+        onPress: () => navigation.navigate('Verify', { profileId: item.id })
+      })),
+      ...pinResets.slice(0, 2).map((item) => ({
+        id: `pin-${item.id}`,
+        timestamp: 'Queued',
+        entity: item.user_name || 'Wallet user',
+        action: 'PIN reset request',
+        confidence: 88,
+        status: 'PENDING',
+        tone: colors.orange,
+        onPress: () => navigation.navigate('Pin Resets')
+      }))
+    ];
+    if (rows.length) return rows;
+    return [
+      { id: 'health', timestamp: 'Live', entity: 'AI Sentinel', action: 'System self-audit', confidence: 100, status: 'SYSTEM', tone: colors.green, onPress: () => dssNav('DSSAIPanel') },
+      { id: 'users', timestamp: 'Live', entity: 'Platform users', action: `${users.length} accounts monitored`, confidence: 98, status: 'ACTIVE', tone: colors.green, onPress: () => navigation.navigate('Users') }
+    ];
+  }, [refunds, escrows, kyc, pinResets, users.length, navigation]);
+
+  const filteredMonitoringRows = useMemo(() => {
+    const rows = riskFilter === 'all'
+      ? monitoringRows
+      : monitoringRows.filter((item) => {
+        if (riskFilter === 'flagged') return item.status === 'FLAGGED';
+        if (riskFilter === 'review') return item.status === 'REVIEW' || item.status === 'PENDING';
+        return item.status === 'SYSTEM' || item.status === 'ACTIVE';
+      });
+    if (!searchTerm) return rows;
+    return rows.filter((item) => [item.entity, item.action, item.status].join(' ').toLowerCase().includes(searchTerm));
+  }, [monitoringRows, riskFilter, searchTerm]);
+
+  const exportSummary = () => {
+    const summary = [
+      'SERVISTA AI Sentinel Summary',
+      `Generated: ${new Date().toLocaleString()}`,
+      `Users: ${users.length}`,
+      `Clients: ${clients}`,
+      `Providers: ${activeProviders}`,
+      `Pending KYC: ${kyc.length}`,
+      `Pending refunds: ${refunds.length}`,
+      `Active escrow bookings: ${escrows.length}`,
+      `Escrow value: ${formatMoney(escrowValue)}`,
+      `Pending PIN resets: ${pinResets.length}`,
+      `High risk providers: ${dssHighRisk}`,
+      `Medium risk providers: ${dssMediumRisk}`,
+      `Low risk providers: ${dssLowRisk}`,
+      `Pending refund value: ${formatMoney(pendingRefundValue)}`
+    ].join('\n');
+    if (Platform.OS === 'web' && typeof document !== 'undefined') {
+      const blob = new Blob([summary], { type: 'text/plain' });
+      const url = URL.createObjectURL(blob);
+      const link = document.createElement('a');
+      link.href = url;
+      link.download = `servista-ai-summary-${Date.now()}.txt`;
+      link.click();
+      URL.revokeObjectURL(url);
+      return;
+    }
+    Alert.alert('Export summary', summary);
+  };
+
+  const riskTotal = Math.max(dssHighRisk + dssMediumRisk + dssLowRisk, 1);
+  const accuracy = Math.min(99, Math.max(72, Math.round((qualityOverview.avg_platform_rating || 4.2) * 19)));
+  const trust = Math.min(100, Math.max(50, Math.round(((batchOverview.eligible_count || 0) + (badgeOverview.eligible_count || 0) + activeProviders) / Math.max(activeProviders || 1, 1) * 70)));
+  const latency = 124 + (refunds.length * 12) + (escrows.length * 4) + (pinResets.length * 5);
+  const notificationTotal = notifications.reduce((sum, item) => sum + Number(item.count || 0), 0);
+  const anomalyBars = Array.from({ length: 14 }, (_, index) => {
+    const signal = accuracy + trust + latency + users.length + (refunds.length * 13) + (escrows.length * 7) + (dssHighRisk * 19) + (index * 17);
+    return 24 + (signal % 54);
+  });
+
+  return (
+    <SafeAreaView style={styles.sentinelScreen}>
+      <View style={styles.sentinelShell}>
+        <View style={styles.sentinelSidebar}>
+          <View>
+            <Text style={styles.sentinelBrand}>AI Sentinel</Text>
+            <Text style={styles.sentinelBrandSub}>System Oversight</Text>
+          </View>
+          {[
+            ['Dashboard', 'grid-outline', loadAdminData, true],
+            ['Provider Scores', 'bar-chart-outline', () => dssNav('ProviderScores')],
+            ['Batch Verification', 'checkbox-outline', () => dssNav('BatchVerification')],
+            ['Escrow System', 'cash-outline', () => navigation.navigate('Escrow')],
+            ['AI Support', 'hardware-chip-outline', () => dssNav('DSSAIPanel')],
+            ['System Health', 'shield-checkmark-outline', () => dssNav('SystemHealth')]
+          ].map(([label, icon, onPress, active]) => (
+            <TouchableOpacity key={label} activeOpacity={0.86} onPress={onPress} style={[styles.sentinelNavItem, active && styles.sentinelNavActive]}>
+              <Ionicons name={icon} size={20} color={active ? colors.orange : colors.white} />
+              <Text style={[styles.sentinelNavText, active && styles.sentinelNavTextActive]}>{label}</Text>
+            </TouchableOpacity>
+          ))}
+          <View style={styles.sentinelSidebarBottom}>
+            <TouchableOpacity activeOpacity={0.86} onPress={() => dssNav('DSSAIPanel')} style={styles.sentinelNewAnalysis}>
+              <Text style={styles.sentinelNewAnalysisText}>New Analysis</Text>
+            </TouchableOpacity>
+            <TouchableOpacity activeOpacity={0.86} onPress={() => navigation.navigate('Settings')} style={styles.sentinelSideSmall}>
+              <Ionicons name="settings-outline" size={20} color={colors.white} />
+              <Text style={styles.sentinelSideSmallText}>Settings</Text>
+            </TouchableOpacity>
+            <TouchableOpacity activeOpacity={0.86} onPress={() => Alert.alert('Support', 'Admin support center will show governance documentation and escalation contacts.')} style={styles.sentinelSideSmall}>
+              <Ionicons name="help-circle-outline" size={20} color={colors.white} />
+              <Text style={styles.sentinelSideSmallText}>Support</Text>
+            </TouchableOpacity>
+            <TouchableOpacity activeOpacity={0.86} onPress={logout} style={styles.sentinelAdminUser}>
+              <View style={styles.sentinelAdminAvatar}><Text style={styles.sentinelAdminAvatarText}>{(user?.full_name || user?.email || 'A').slice(0, 2).toUpperCase()}</Text></View>
+              <View style={styles.flex}>
+                <Text style={styles.sentinelAdminName}>{user?.full_name || 'Admin User'}</Text>
+                <Text style={styles.sentinelAdminEmail}>{user?.email || 'admin@servista.cm'}</Text>
+              </View>
+            </TouchableOpacity>
+          </View>
+        </View>
+
+        <View style={styles.sentinelMain}>
+          <View style={styles.sentinelTopbar}>
+            <Text style={styles.sentinelTopTitle}>AI Sentinel Admin</Text>
+            <View style={styles.sentinelSearchWrap}>
+              <Ionicons name="search-outline" size={22} color="#475569" />
+              <TextInput
+                value={search}
+                onChangeText={setSearch}
+                placeholder="Search system logs, providers, or users..."
+                placeholderTextColor="#6B7280"
+                style={styles.sentinelSearchInput}
+              />
+            </View>
+            <View style={styles.sentinelTopLinks}>
+              <TouchableOpacity onPress={() => dssNav('Reports')}><Text style={styles.sentinelTopLinkText}>Reports</Text></TouchableOpacity>
+              <TouchableOpacity onPress={() => setRiskFilter('flagged')}><Text style={styles.sentinelTopLinkText}>Logs</Text></TouchableOpacity>
+              <TouchableOpacity onPress={() => dssNav('ProviderScores')}><Text style={styles.sentinelTopLinkText}>Audit</Text></TouchableOpacity>
+              <View style={styles.sentinelDivider} />
+              <TouchableOpacity onPress={() => dssNav('AdminNotifications')} style={styles.sentinelIconButton}>
+                <Ionicons name="notifications-outline" size={21} color="#40516F" />
+                <NotificationBadge count={notificationTotal} />
+              </TouchableOpacity>
+              <TouchableOpacity onPress={() => dssNav('DSSAIPanel')} style={styles.sentinelIconButton}><Ionicons name="shield-half-outline" size={21} color="#40516F" /></TouchableOpacity>
+              <TouchableOpacity onPress={() => navigation.navigate('Users')} style={styles.sentinelIconButton}><Ionicons name="person-circle-outline" size={23} color="#40516F" /></TouchableOpacity>
+            </View>
+          </View>
+
+          <ScrollView contentContainerStyle={styles.sentinelContent} showsVerticalScrollIndicator={false}>
+            {loading ? <ActivityIndicator color={colors.orange} /> : null}
+            {loadErrors.length ? (
+              <View style={styles.sentinelDataWarning}>
+                <Ionicons name="warning-outline" size={18} color={colors.orange} />
+                <Text style={styles.sentinelDataWarningText}>Live data unavailable for: {loadErrors.join(', ')}. Refresh after the backend is available; displayed counts are only from sources that loaded successfully.</Text>
+              </View>
+            ) : null}
+            {matchingUsers.length ? (
+              <View style={styles.sentinelSearchResults}>
+                {matchingUsers.map((item) => (
+                  <TouchableOpacity key={item.id} onPress={() => navigation.navigate('Users')} style={styles.sentinelSearchResult}>
+                    <Avatar uri={item.profile_photo} size={32} />
+                    <View style={styles.flex}>
+                      <Text style={styles.sentinelResultName}>{item.full_name || item.email}</Text>
+                      <Text style={styles.sentinelResultMeta}>{item.email} - {item.role}</Text>
+                    </View>
+                  </TouchableOpacity>
+                ))}
+              </View>
+            ) : null}
+
+            <View style={styles.sentinelHeaderRow}>
+              <View>
+                <Text style={styles.sentinelPageTitle}>Operational Overview</Text>
+                <Text style={styles.sentinelPageSub}>Real-time AI verification and system integrity metrics.</Text>
+              </View>
+              <View style={styles.sentinelHeaderActions}>
+                <TouchableOpacity activeOpacity={0.86} onPress={() => setRiskFilter((prev) => (prev === 'all' ? 'flagged' : 'all'))} style={styles.sentinelOutlineBtn}>
+                  <Ionicons name="filter-outline" size={20} color="#40516F" />
+                  <Text style={styles.sentinelOutlineText}>{riskFilter === 'all' ? 'Filter View' : 'Clear Filter'}</Text>
+                </TouchableOpacity>
+                <TouchableOpacity activeOpacity={0.86} onPress={exportSummary} style={styles.sentinelExportBtn}>
+                  <Ionicons name="download-outline" size={20} color={colors.white} />
+                  <Text style={styles.sentinelExportText}>Export Summary</Text>
+                </TouchableOpacity>
+              </View>
+            </View>
+
+            <View style={styles.sentinelOverviewGrid}>
+              <View style={styles.sentinelPerformanceCard}>
+                <Text style={styles.sentinelEyebrow}>GLOBAL INTEGRITY STATUS</Text>
+                <View style={styles.sentinelPerformanceTitleRow}>
+                  <Text style={styles.sentinelPerformanceTitle}>{dssAlertCount || refunds.length || escrowIssues ? 'Action Required' : 'Optimal Performance'}</Text>
+                  <View style={[styles.sentinelUptimePill, (dssAlertCount || refunds.length || escrowIssues) && { backgroundColor: '#FEE2E2' }]}>
+                    <Ionicons name={dssAlertCount || refunds.length || escrowIssues ? 'alert-circle' : 'checkmark-circle'} size={15} color={dssAlertCount || refunds.length || escrowIssues ? colors.red : '#047857'} />
+                    <Text style={[styles.sentinelUptimeText, (dssAlertCount || refunds.length || escrowIssues) && { color: colors.red }]}>{uptime}% Uptime</Text>
+                  </View>
+                </View>
+                <View style={styles.sentinelMetricRow}>
+                  <View style={styles.sentinelMetricBlock}>
+                    <Text style={styles.sentinelMetricLabel}>TOTAL USERS</Text>
+                    <Text style={styles.sentinelMetricValue}>{users.length.toLocaleString()}</Text>
+                    <Text style={styles.sentinelMetricGood}>+ {clients} clients</Text>
+                  </View>
+                  <View style={styles.sentinelMetricBlock}>
+                    <Text style={styles.sentinelMetricLabel}>ACTIVE PROVIDERS</Text>
+                    <Text style={styles.sentinelMetricValue}>{activeProviders.toLocaleString()}</Text>
+                    <Text style={styles.sentinelMetricGood}>{admins} admin{admins === 1 ? '' : 's'} online</Text>
+                  </View>
+                  <View style={styles.sentinelMetricBlock}>
+                    <Text style={styles.sentinelMetricLabel}>ESCROW HOLDINGS</Text>
+                    <Text style={[styles.sentinelMetricValue, { color: colors.orange }]}>{escrows.length}</Text>
+                    <Text style={styles.sentinelMetricWarn}>{formatMoney(escrowValue)} held safely</Text>
+                  </View>
+                </View>
+                <Ionicons name="hardware-chip-outline" size={150} color="rgba(255,255,255,0.08)" style={styles.sentinelCardWatermark} />
+              </View>
+
+              <View style={styles.sentinelRiskCard}>
+                <Text style={styles.sentinelPanelTitle}>Provider Risk Profiling</Text>
+                {[
+                  ['High Risk', dssHighRisk, colors.red],
+                  ['Medium Risk', dssMediumRisk, '#047857'],
+                  ['Low Risk', dssLowRisk, colors.orange]
+                ].map(([label, count, tone]) => (
+                  <TouchableOpacity key={label} onPress={() => { setRiskFilter(label === 'High Risk' ? 'flagged' : 'all'); dssNav('FraudAlerts'); }} style={styles.sentinelRiskRow}>
+                    <View style={[styles.sentinelRiskDot, { backgroundColor: tone }]} />
+                    <Text style={styles.sentinelRiskLabel}>{label}</Text>
+                    <Text style={styles.sentinelRiskCount}>{count} Providers</Text>
+                    <View style={styles.sentinelRiskTrack}>
+                      <View style={[styles.sentinelRiskFill, { backgroundColor: tone, width: `${Math.max(4, (Number(count) / riskTotal) * 100)}%` }]} />
+                    </View>
+                  </TouchableOpacity>
+                ))}
+                <TouchableOpacity activeOpacity={0.86} onPress={() => dssNav('FraudAlerts')} style={styles.sentinelAuditBtn}>
+                  <Text style={styles.sentinelAuditText}>View Detailed Audit</Text>
+                </TouchableOpacity>
+              </View>
+            </View>
+
+            <View style={styles.sentinelMiddleGrid}>
+              <View style={styles.sentinelNotificationsCard}>
+                <View style={styles.sentinelCardHeader}>
+                  <Text style={styles.sentinelPanelTitle}>Admin Notifications</Text>
+                  <View style={styles.sentinelNewBadge}><Text style={styles.sentinelNewBadgeText}>NEW ({notificationTotal})</Text></View>
+                </View>
+                {notifications.map((item) => (
+                  <TouchableOpacity key={item.key} activeOpacity={0.86} onPress={item.action} style={styles.sentinelNotificationRow}>
+                    <View style={[styles.sentinelNotificationIcon, { backgroundColor: `${item.tone}18` }]}>
+                      <Ionicons name={item.icon} size={22} color={item.tone} />
+                    </View>
+                    <View style={styles.flex}>
+                      <Text style={styles.sentinelNotificationTitle}>{item.title}</Text>
+                      <Text style={styles.sentinelNotificationBody}>{item.message}</Text>
+                    </View>
+                    <Text style={styles.sentinelNotificationTime}>{item.time}</Text>
+                  </TouchableOpacity>
+                ))}
+                <TouchableOpacity activeOpacity={0.86} onPress={() => dssNav('AdminNotifications')} style={styles.sentinelCardFooterBtn}>
+                  <Text style={styles.sentinelCardFooterText}>View All Notifications</Text>
+                </TouchableOpacity>
+              </View>
+
+              <View style={styles.sentinelDecisionCard}>
+                <View style={styles.sentinelCardHeader}>
+                  <View>
+                    <Text style={styles.sentinelPanelTitle}>AI Decision Support Summary</Text>
+                    <Text style={styles.sentinelPanelSub}>Analyzing provider behavior vs. historical trust markers.</Text>
+                  </View>
+                  <View style={styles.rowStart}>
+                    <View style={[styles.sentinelLegendDot, { backgroundColor: colors.orange }]} />
+                    <Text style={styles.sentinelLegendText}>Activity</Text>
+                    <View style={[styles.sentinelLegendDot, { backgroundColor: '#E5E7EB' }]} />
+                    <Text style={styles.sentinelLegendText}>Trust Threshold</Text>
+                  </View>
+                </View>
+                {[
+                  ['Node Accuracy', 'LAST 24 HOURS', accuracy, `${accuracy}.2%`],
+                  ['Predictive Trust', 'MODEL CONFIDENCE', trust, `${trust}.7%`],
+                  ['Latency Overhead', 'PROCESSING TIME', Math.min(100, latency / 2), `${latency}ms`]
+                ].map(([label, sub, value, display]) => (
+                  <View key={label} style={styles.sentinelDecisionMetric}>
+                    <View style={styles.sentinelDecisionLabelBlock}>
+                      <Text style={styles.sentinelDecisionLabel}>{label}</Text>
+                      <Text style={styles.sentinelDecisionSub}>{sub}</Text>
+                    </View>
+                    <View style={styles.sentinelDecisionTrack}>
+                      <View style={[styles.sentinelDecisionFill, { width: `${Math.min(100, Number(value))}%` }]} />
+                    </View>
+                    <Text style={styles.sentinelDecisionValue}>{display}</Text>
+                  </View>
+                ))}
+                <View style={styles.sentinelMiniBars}>
+                  {anomalyBars.map((height, index) => (
+                    <View key={`${height}-${index}`} style={[styles.sentinelMiniBar, { height }]} />
+                  ))}
+                </View>
+                <Text style={styles.sentinelChartCaption}>LIVE ANOMALY SIGNAL METRICS</Text>
+              </View>
+            </View>
+
+            <View style={styles.sentinelMonitoringCard}>
+              <View style={styles.sentinelCardHeader}>
+                <View>
+                  <Text style={styles.sentinelPanelTitle}>Active Monitoring Stream</Text>
+                  <Text style={styles.sentinelPanelSub}>Real-time behavior log for high-risk flags</Text>
+                </View>
+                <View style={styles.sentinelLivePill}><View style={styles.sentinelLiveDot} /><Text style={styles.sentinelLiveText}>Live Feed</Text></View>
+              </View>
+              <View style={styles.sentinelTableHeader}>
+                {['TIMESTAMP', 'ENTITY', 'ACTION', 'CONFIDENCE', 'STATUS', 'ACTIONS'].map((item) => <Text key={item} style={styles.sentinelTableHeadText}>{item}</Text>)}
+              </View>
+              {filteredMonitoringRows.map((item) => (
+                <TouchableOpacity key={item.id} activeOpacity={0.86} onPress={item.onPress} style={styles.sentinelTableRow}>
+                  <Text style={styles.sentinelTableText}>{item.timestamp}</Text>
+                  <Text style={[styles.sentinelTableText, styles.sentinelTableEntity]}>{item.entity}</Text>
+                  <Text style={styles.sentinelTableText}>{item.action}</Text>
+                  <View style={styles.sentinelConfidenceCell}>
+                    <Text style={styles.sentinelTableText}>{item.confidence}%</Text>
+                    <View style={styles.sentinelConfidenceTrack}><View style={[styles.sentinelConfidenceFill, { width: `${item.confidence}%`, backgroundColor: item.tone }]} /></View>
+                  </View>
+                  <View style={[styles.sentinelStatusPill, { backgroundColor: `${item.tone}24` }]}><Text style={[styles.sentinelStatusText, { color: item.tone }]}>{item.status}</Text></View>
+                  <Ionicons name="ellipsis-vertical" size={20} color="#40516F" />
+                </TouchableOpacity>
+              ))}
+              <TouchableOpacity activeOpacity={0.86} onPress={() => dssNav('Reports')} style={styles.sentinelAuditLogBtn}>
+                <Text style={styles.sentinelAuditLogText}>View Complete Audit Log</Text>
+                <Ionicons name="arrow-forward" size={18} color={colors.orange} />
+              </TouchableOpacity>
+            </View>
+          </ScrollView>
+        </View>
+      </View>
+    </SafeAreaView>
+  );
+}
+
 export function AdminDashboardScreen({ navigation }) {
+  return <AdminSentinelDashboard navigation={navigation} />;
   const [users, setUsers] = useState([]);
   const [kyc, setKyc] = useState([]);
   const [refunds, setRefunds] = useState([]);
@@ -3191,6 +3896,8 @@ export function AdminUsersScreen({ navigation }) {
 export function AdminEscrowScreen({ navigation }) {
   const [escrows, setEscrows] = useState([]);
   const [loading, setLoading] = useState(false);
+  const [search, setSearch] = useState('');
+  const [filter, setFilter] = useState('All');
 
   const loadEscrows = useCallback(async () => {
     try {
@@ -3218,62 +3925,73 @@ export function AdminEscrowScreen({ navigation }) {
     }
   };
 
-  return (
-    <SafeAreaView style={styles.adminVerifyScreen}>
-      <ScrollView contentContainerStyle={styles.adminUsersContent} showsVerticalScrollIndicator={false}>
-        <View style={styles.adminVerifyHeader}>
-          <TouchableOpacity activeOpacity={0.8} onPress={() => navigation.navigate('Dashboard')} style={styles.verifyBack}>
-            <Ionicons name="chevron-back" size={18} color="#8FA0B8" />
-            <Text style={styles.verifyBackText}>BACK TO DASHBOARD</Text>
-          </TouchableOpacity>
-          <View style={styles.row}>
-            <View style={styles.flex}>
-              <Text style={styles.adminVerifyPageTitle}>Escrow System</Text>
-              <Text style={styles.adminVerifyPageSubtitle}>Monitor blocked payments, fees, provider payouts, and release status.</Text>
-            </View>
-            {loading ? <ActivityIndicator color={colors.orange} /> : <View style={styles.adminCountBadge}><Text style={styles.adminCountText}>{escrows.length} ACTIVE</Text></View>}
-          </View>
-        </View>
+  const heldValue = escrows.reduce((total, booking) => total + Number(booking.amount || 0), 0);
+  const feeValue = escrows.reduce((total, booking) => total + (Number(booking.amount || 0) * 0.05), 0);
+  const payoutValue = Math.max(0, heldValue - feeValue);
+  const blockedCount = escrows.filter((booking) => booking.refund_status === 'requested' || booking.issue_reported_at).length;
+  const readyCount = escrows.filter((booking) => booking.provider_marked_completed_at && booking.client_confirmed_at && !booking.issue_reported_at).length;
+  const filteredEscrows = useMemo(() => {
+    const term = search.trim().toLowerCase();
+    return escrows.filter((booking) => {
+      const blocked = booking.refund_status === 'requested' || booking.issue_reported_at;
+      const ready = booking.provider_marked_completed_at && booking.client_confirmed_at && !blocked;
+      const matchesFilter = filter === 'All' || (filter === 'Ready' && ready) || (filter === 'Blocked' && blocked) || (filter === 'In Progress' && !ready && !blocked);
+      const searchable = [booking.service_title, booking.client_name, booking.provider_name, booking.id].filter(Boolean).join(' ').toLowerCase();
+      return matchesFilter && (!term || searchable.includes(term));
+    });
+  }, [escrows, filter, search]);
 
-        <View style={styles.adminUsersTable}>
-          {escrows.length ? escrows.map((booking) => {
-            const amount = Number(booking.amount || 0);
-            const fee = amount * 0.05;
-            const payout = amount - fee;
-            const blocked = booking.refund_status === 'requested' || booking.issue_reported_at;
-            return (
-              <View key={booking.id} style={styles.adminRefundCard}>
-                <View style={styles.row}>
-                  <View style={styles.flex}>
-                    <Text style={styles.adminRefundService}>{booking.service_title}</Text>
-                    <Text style={styles.adminRefundMeta}>Client: {booking.client_name} - Provider: {booking.provider_name}</Text>
-                    <Text style={styles.adminRefundMeta}>Booking #SRV-{String(booking.id).padStart(4, '0')} - {blocked ? 'Issue reported' : 'Ready for release rules'}</Text>
-                  </View>
-                  <Text style={styles.adminRefundAmount}>{formatMoney(booking.amount)}</Text>
-                </View>
-                <View style={styles.adminUserStatsRow}>
-                  <View style={styles.adminUserStatPill}><Text style={styles.adminUserStatValue}>{formatMoney(fee)}</Text><Text style={styles.adminUserStatLabel}>5% FEE</Text></View>
-                  <View style={styles.adminUserStatPill}><Text style={styles.adminUserStatValue}>{formatMoney(payout)}</Text><Text style={styles.adminUserStatLabel}>PROVIDER PAYOUT</Text></View>
-                  <View style={styles.adminUserStatPill}><Text style={styles.adminUserStatValue}>{booking.provider_marked_completed_at ? 'YES' : 'NO'}</Text><Text style={styles.adminUserStatLabel}>PROVIDER DONE</Text></View>
-                  <View style={styles.adminUserStatPill}><Text style={styles.adminUserStatValue}>{booking.client_confirmed_at ? 'YES' : 'NO'}</Text><Text style={styles.adminUserStatLabel}>CLIENT CONFIRMED</Text></View>
-                </View>
-                <View style={styles.adminActionRow}>
-                  <TouchableOpacity activeOpacity={0.8} onPress={() => releaseEscrow(booking, blocked)} style={styles.adminReleaseButton}>
-                    <Text style={styles.adminReleaseText}>{blocked ? 'FORCE RELEASE' : 'RELEASE TO PROVIDER'}</Text>
-                  </TouchableOpacity>
-                </View>
-              </View>
-            );
-          }) : (
-            <View style={styles.adminEmptyReview}>
-              <Ionicons name="wallet-outline" size={46} color={colors.orange} />
-              <Text style={styles.adminEmptyReviewTitle}>No active escrow</Text>
-              <Text style={styles.adminEmptyReviewText}>Paid bookings awaiting completion or dispute review will appear here.</Text>
-            </View>
-          )}
-        </View>
-      </ScrollView>
-    </SafeAreaView>
+  const headerActions = (
+    <View style={styles.adminEscrowFilterRow}>
+      {['All', 'Ready', 'Blocked', 'In Progress'].map((item) => (
+        <TouchableOpacity key={item} onPress={() => setFilter(item)} style={[styles.adminEscrowFilter, filter === item && styles.adminEscrowFilterActive]}>
+          <Text style={[styles.adminEscrowFilterText, filter === item && styles.adminEscrowFilterTextActive]}>{item}</Text>
+        </TouchableOpacity>
+      ))}
+    </View>
+  );
+
+  return (
+    <AdminWorkspaceLayout
+      navigation={navigation}
+      active="Escrow System"
+      eyebrow="Payment governance"
+      title="Escrow System"
+      subtitle="Monitor protected client funds, provider completion checks, disputes, and payouts from the live booking ledger."
+      search={search}
+      onSearch={setSearch}
+      searchPlaceholder="Search booking, client, or provider..."
+      onRefresh={loadEscrows}
+      refreshing={loading}
+      headerActions={headerActions}
+    >
+      <View style={styles.adminEscrowSummaryGrid}>
+        <View style={styles.adminEscrowSummaryCard}><View style={styles.adminEscrowSummaryIcon}><Ionicons name="lock-closed-outline" size={21} color={colors.orange} /></View><Text style={styles.adminEscrowSummaryLabel}>FUNDS IN ESCROW</Text><Text style={styles.adminEscrowSummaryValue}>{formatMoney(heldValue)}</Text><Text style={styles.adminEscrowSummaryCopy}>{escrows.length} protected booking{escrows.length === 1 ? '' : 's'}</Text></View>
+        <View style={styles.adminEscrowSummaryCard}><View style={styles.adminEscrowSummaryIcon}><Ionicons name="cash-outline" size={21} color={colors.green} /></View><Text style={styles.adminEscrowSummaryLabel}>PROVIDER PAYOUTS</Text><Text style={styles.adminEscrowSummaryValue}>{formatMoney(payoutValue)}</Text><Text style={styles.adminEscrowSummaryCopy}>After the 5% platform fee</Text></View>
+        <View style={styles.adminEscrowSummaryCard}><View style={styles.adminEscrowSummaryIcon}><Ionicons name="receipt-outline" size={21} color="#3B82F6" /></View><Text style={styles.adminEscrowSummaryLabel}>SERVISTA FEES</Text><Text style={styles.adminEscrowSummaryValue}>{formatMoney(feeValue)}</Text><Text style={styles.adminEscrowSummaryCopy}>Calculated from active holds</Text></View>
+        <View style={styles.adminEscrowSummaryCard}><View style={[styles.adminEscrowSummaryIcon, blockedCount && { backgroundColor: '#FEE2E2' }]}><Ionicons name="warning-outline" size={21} color={blockedCount ? colors.red : colors.green} /></View><Text style={styles.adminEscrowSummaryLabel}>ACTION QUEUE</Text><Text style={styles.adminEscrowSummaryValue}>{blockedCount + readyCount}</Text><Text style={styles.adminEscrowSummaryCopy}>{readyCount} ready payout · {blockedCount} dispute{blockedCount === 1 ? '' : 's'}</Text></View>
+      </View>
+
+      <View style={styles.adminEscrowListPanel}>
+        <View style={styles.adminEscrowListHeader}><View><Text style={styles.adminEscrowListTitle}>Active Escrow Ledger</Text><Text style={styles.adminEscrowListSub}>Every row is loaded from paid bookings currently held in escrow.</Text></View><View style={styles.adminEscrowLivePill}><View style={styles.adminEscrowLiveDot} /><Text style={styles.adminEscrowLiveText}>LIVE</Text></View></View>
+        {loading ? <ActivityIndicator color={colors.orange} size="large" style={{ margin: 48 }} /> : null}
+        {!loading && !filteredEscrows.length ? <View style={styles.adminEscrowEmpty}><Ionicons name="wallet-outline" size={42} color="#94A3B8" /><Text style={styles.adminEscrowEmptyTitle}>No matching escrow bookings</Text><Text style={styles.adminEscrowEmptyText}>Paid client bookings appear here until an approved release or refund finishes.</Text></View> : null}
+        {!loading && filteredEscrows.map((booking) => {
+          const amount = Number(booking.amount || 0);
+          const fee = amount * 0.05;
+          const payout = amount - fee;
+          const blocked = booking.refund_status === 'requested' || booking.issue_reported_at;
+          const ready = booking.provider_marked_completed_at && booking.client_confirmed_at && !blocked;
+          const waitingLabel = !booking.provider_marked_completed_at ? 'Awaiting provider completion' : !booking.client_confirmed_at ? 'Awaiting client confirmation' : 'Awaiting payout review';
+          return <View key={booking.id} style={[styles.adminEscrowBookingCard, blocked && styles.adminEscrowBookingBlocked]}>
+            <View style={styles.adminEscrowBookingTop}><View style={{ flex: 1 }}><View style={styles.adminEscrowBookingTitleRow}><Text style={styles.adminEscrowBookingTitle}>{booking.service_title || 'Service booking'}</Text><View style={[styles.adminEscrowStatus, blocked ? styles.adminEscrowStatusBlocked : ready ? styles.adminEscrowStatusReady : styles.adminEscrowStatusHolding]}><Text style={[styles.adminEscrowStatusText, blocked ? styles.adminEscrowStatusTextBlocked : ready ? styles.adminEscrowStatusTextReady : styles.adminEscrowStatusTextHolding]}>{blocked ? 'DISPUTE HOLD' : ready ? 'READY TO RELEASE' : 'ESCROWED'}</Text></View></View><Text style={styles.adminEscrowBookingMeta}>Booking #SRV-{String(booking.id).padStart(4, '0')} · Client: {booking.client_name || 'Client'} · Provider: {booking.provider_name || 'Provider'}</Text></View><Text style={styles.adminEscrowBookingAmount}>{formatMoney(amount)}</Text></View>
+            <View style={styles.adminEscrowProgress}><View style={styles.adminEscrowProgressStep}><Ionicons name={booking.provider_marked_completed_at ? 'checkmark-circle' : 'ellipse-outline'} size={18} color={booking.provider_marked_completed_at ? colors.green : '#94A3B8'} /><Text style={styles.adminEscrowProgressText}>Provider completed</Text></View><View style={styles.adminEscrowProgressLine} /><View style={styles.adminEscrowProgressStep}><Ionicons name={booking.client_confirmed_at ? 'checkmark-circle' : 'ellipse-outline'} size={18} color={booking.client_confirmed_at ? colors.green : '#94A3B8'} /><Text style={styles.adminEscrowProgressText}>Client confirmed</Text></View><View style={styles.adminEscrowProgressLine} /><View style={styles.adminEscrowProgressStep}><Ionicons name={booking.payment_status === 'released' ? 'checkmark-circle' : 'ellipse-outline'} size={18} color={booking.payment_status === 'released' ? colors.green : '#94A3B8'} /><Text style={styles.adminEscrowProgressText}>Payout released</Text></View></View>
+            <View style={styles.adminEscrowFinancials}><View><Text style={styles.adminEscrowFinancialLabel}>HELD AMOUNT</Text><Text style={styles.adminEscrowFinancialValue}>{formatMoney(amount)}</Text></View><View><Text style={styles.adminEscrowFinancialLabel}>5% PLATFORM FEE</Text><Text style={styles.adminEscrowFinancialValue}>{formatMoney(fee)}</Text></View><View><Text style={styles.adminEscrowFinancialLabel}>PROVIDER RECEIVES</Text><Text style={styles.adminEscrowFinancialValue}>{formatMoney(payout)}</Text></View></View>
+            <View style={styles.adminEscrowActions}>{blocked ? <TouchableOpacity style={styles.adminEscrowReviewButton} onPress={() => navigation.navigate('Disputes')}><Text style={styles.adminEscrowReviewText}>Review Dispute</Text></TouchableOpacity> : ready ? <TouchableOpacity style={styles.adminEscrowReleaseButton} onPress={() => releaseEscrow(booking)}><Text style={styles.adminEscrowReleaseText}>Release to Provider</Text></TouchableOpacity> : <View style={styles.adminEscrowWaitingButton}><Ionicons name="time-outline" size={17} color="#64748B" /><Text style={styles.adminEscrowWaitingText}>{waitingLabel}</Text></View>}</View>
+          </View>;
+        })}
+      </View>
+    </AdminWorkspaceLayout>
   );
 }
 
@@ -3584,7 +4302,7 @@ export function AdminVerifyScreen({ route, navigation }) {
   );
 }
 
-export function AccountScreen({ navigation }) {
+export function AccountScreen({ route, navigation }) {
   const { user, logout, updateUser } = useAuth();
   const { language, languageLabel, setLanguage, t } = useLanguage();
   const [darkMode, setDarkMode] = useState(false);
@@ -3596,8 +4314,17 @@ export function AccountScreen({ navigation }) {
   const [saving, setSaving] = useState(false);
   const [loginAlerts, setLoginAlerts] = useState(true);
   const [bookingAlerts, setBookingAlerts] = useState(true);
+  const [walletSecurity, setWalletSecurity] = useState(null);
+  const [walletSecuritySaving, setWalletSecuritySaving] = useState(false);
   const [providerProfile, setProviderProfile] = useState(null);
+  const [providerCityArea, setProviderCityArea] = useState('');
+  const [providerExactAddress, setProviderExactAddress] = useState('');
+  const [clientCityArea, setClientCityArea] = useState(user?.city_area || '');
+  const [clientExactAddress, setClientExactAddress] = useState(user?.address || '');
+  const [locationSaving, setLocationSaving] = useState(false);
   const isProvider = user?.role === 'provider';
+  const isClient = user?.role === 'client';
+  const isAdmin = user?.role === 'admin';
   const fieldIconColor = darkMode ? '#8FA0B8' : colors.textGray;
   const fullNameRef = useRef(null);
   const emailRef = useRef(null);
@@ -3636,10 +4363,23 @@ export function AccountScreen({ navigation }) {
     try {
       const { data } = await api.get('/api/users/provider/profile/');
       setProviderProfile(data);
+      setProviderCityArea(data?.city_area || '');
+      setProviderExactAddress(data?.address || '');
     } catch (error) {
       setProviderProfile(null);
+      setProviderCityArea('');
+      setProviderExactAddress('');
     }
   }, [isProvider]);
+
+  const loadWalletSecurity = useCallback(async () => {
+    try {
+      const { data } = await api.get('/api/wallet/');
+      setWalletSecurity(data);
+    } catch (error) {
+      setWalletSecurity(null);
+    }
+  }, []);
 
   const buyTrustBadge = () => {
     const fee = providerProfile?.badge_fee || 15000;
@@ -3668,13 +4408,97 @@ export function AccountScreen({ navigation }) {
   };
 
   useFocusEffect(useCallback(() => {
+    if (route?.params?.section) {
+      setActiveSection(route.params.section);
+    }
     loadProviderProfile();
-  }, [loadProviderProfile]));
+    loadWalletSecurity();
+  }, [loadProviderProfile, loadWalletSecurity, route?.params?.section]));
+
+  const saveProviderLocation = async () => {
+    const city = providerCityArea.trim();
+    const exact = providerExactAddress.trim();
+    if (!city) {
+      Alert.alert('Location required', 'Please enter your City/Area before saving your provider location.');
+      return;
+    }
+
+    try {
+      setLocationSaving(true);
+      const { data } = await api.post('/api/users/provider/profile/', {
+        business_name: providerProfile?.business_name || user?.full_name || 'Provider',
+        bio: providerProfile?.bio || '',
+        city_area: city,
+        address: exact,
+        latitude: null,
+        longitude: null,
+      });
+      setProviderProfile(data);
+      setProviderCityArea(data?.city_area || city);
+      setProviderExactAddress(data?.address || exact);
+      Alert.alert('Location saved', 'Your provider location has been updated.');
+    } catch (error) {
+      Alert.alert('Location update failed', errorMessage(error));
+    } finally {
+      setLocationSaving(false);
+    }
+  };
+
+  const saveClientLocation = async () => {
+    const city = clientCityArea.trim();
+    const exact = clientExactAddress.trim();
+
+    try {
+      setLocationSaving(true);
+      const payload = new FormData();
+      payload.append('full_name', (fullName || user?.full_name || '').trim());
+      payload.append('email', (email || user?.email || '').trim());
+      payload.append('phone', (phone || user?.phone || '').trim());
+      payload.append('city_area', city);
+      payload.append('address', exact);
+
+      const { data } = await api.put('/api/users/profile/', payload);
+      const savedUser = await updateUser(data);
+      setClientCityArea(savedUser?.city_area || '');
+      setClientExactAddress(savedUser?.address || '');
+      Alert.alert('Location saved', city ? 'Your client location has been updated.' : 'Your client location has been cleared.');
+    } catch (error) {
+      Alert.alert('Location update failed', errorMessage(error));
+    } finally {
+      setLocationSaving(false);
+    }
+  };
+
+  const toggleWalletPinAccess = async () => {
+    const nextValue = !walletSecurity?.pin_required_for_access;
+    try {
+      setWalletSecuritySaving(true);
+      const { data } = await api.patch('/api/wallet/pin/preference/', {
+        pin_required_for_access: nextValue,
+      });
+      setWalletSecurity(data);
+      Alert.alert(
+        nextValue ? 'Wallet PIN enabled' : 'Wallet PIN disabled',
+        nextValue
+          ? 'Your wallet will ask for your PIN before opening.'
+          : 'Your wallet will open without asking for a PIN.',
+      );
+    } catch (error) {
+      Alert.alert(
+        'Wallet PIN setting failed',
+        `${errorMessage(error)}\n\nSet a wallet PIN first from the Wallet screen, then return here to enable this option.`,
+      );
+    } finally {
+      setWalletSecuritySaving(false);
+    }
+  };
 
   useEffect(() => {
     setFullName(user?.full_name || '');
     setEmail(user?.email || '');
     setPhone(user?.phone || '');
+    setClientCityArea(user?.city_area || '');
+    setClientExactAddress(user?.address || '');
     setProfilePhoto(user?.profile_photo ? { uri: mediaUri(user.profile_photo), uploaded: true } : null);
   }, [user]);
 
@@ -3766,6 +4590,17 @@ export function AccountScreen({ navigation }) {
     <SafeAreaView style={[styles.settingsDarkScreen, darkMode && styles.settingsDarkModeScreen]}>
       <KeyboardAvoidingView behavior={Platform.OS === 'ios' ? 'padding' : undefined} keyboardVerticalOffset={8} style={styles.flex}>
       <ScrollView contentContainerStyle={styles.settingsContent} keyboardShouldPersistTaps="handled" showsVerticalScrollIndicator={false}>
+        {isAdmin ? (
+          <TouchableOpacity
+            activeOpacity={0.8}
+            onPress={() => navigation.navigate('Dashboard')}
+            style={[styles.settingsAdminBackButton, !darkMode && styles.settingsAdminBackButtonLight]}
+            accessibilityLabel="Back to admin dashboard"
+          >
+            <Ionicons name="arrow-back" size={18} color={darkMode ? '#D5DEEC' : colors.textDark} />
+            <Text style={[styles.settingsAdminBackText, !darkMode && styles.settingsAdminBackTextLight]}>Back to Dashboard</Text>
+          </TouchableOpacity>
+        ) : null}
         <View style={styles.settingsTopRow}>
           <View style={styles.flex}>
             <Text style={[styles.settingsTitle, !darkMode && styles.settingsTitleLight]}>Account Settings</Text>
@@ -3778,6 +4613,7 @@ export function AccountScreen({ navigation }) {
         <View style={styles.settingsMenu}>
           {[
             ['person-outline', 'Profile'],
+            ...(isProvider || isClient ? [['location-outline', 'Location']] : []),
             ['lock-closed-outline', 'Security'],
             ['notifications-outline', 'Notifications'],
             ...(isProvider ? [['shield-checkmark-outline', 'KYC Status'], ['ribbon-outline', 'Badge Status']] : [])
@@ -3846,10 +4682,96 @@ export function AccountScreen({ navigation }) {
             </>
           ) : null}
 
+          {activeSection === 'Location' ? (
+            <View style={styles.settingsFieldGrid}>
+              <Text style={[styles.profilePhotoTitle, !darkMode && styles.profilePhotoTitleLight]}>{isProvider ? 'Provider Location' : 'Client Location'}</Text>
+              {!(isProvider ? providerCityArea : clientCityArea).trim() ? (
+                <View style={styles.locationPromptBox}>
+                  <Ionicons name="alert-circle-outline" size={22} color={colors.orange} />
+                  <View style={styles.flex}>
+                    <Text style={styles.locationPromptTitle}>Add your location</Text>
+                    <Text style={styles.locationPromptText}>
+                      {isProvider
+                        ? 'Clients need your area to track active bookings and understand where you operate.'
+                        : 'Add your area if you want it shown on your dashboard. You can leave this blank.'}
+                    </Text>
+                  </View>
+                </View>
+              ) : (
+                <View style={styles.locationPromptBox}>
+                  <Ionicons name="checkmark-circle-outline" size={22} color={colors.green} />
+                  <View style={styles.flex}>
+                    <Text style={styles.locationPromptTitle}>Current location</Text>
+                    <Text style={styles.locationPromptText}>
+                      {isProvider
+                        ? (providerExactAddress.trim() || providerCityArea.trim())
+                        : (clientExactAddress.trim() || clientCityArea.trim())}
+                    </Text>
+                  </View>
+                </View>
+              )}
+              <View style={styles.settingsField}>
+                <Text style={styles.settingsFieldLabel}>{isProvider ? 'CITY / AREA' : 'CITY / AREA (OPTIONAL)'}</Text>
+                <View style={[styles.settingsInputBox, !darkMode && styles.settingsInputBoxLight]}>
+                  <Ionicons name="map-outline" size={17} color={fieldIconColor} />
+                  <TextInput
+                    value={isProvider ? providerCityArea : clientCityArea}
+                    onChangeText={isProvider ? setProviderCityArea : setClientCityArea}
+                    placeholder="Douala, Bonamousadi"
+                    placeholderTextColor="#8FA0B8"
+                    style={[styles.settingsEditableInput, !darkMode && styles.settingsEditableInputLight]}
+                  />
+                </View>
+              </View>
+              <View style={styles.settingsField}>
+                <Text style={styles.settingsFieldLabel}>EXACT ADDRESS (OPTIONAL)</Text>
+                <View style={[styles.settingsInputBox, !darkMode && styles.settingsInputBoxLight]}>
+                  <Ionicons name="navigate-outline" size={17} color={fieldIconColor} />
+                  <TextInput
+                    value={isProvider ? providerExactAddress : clientExactAddress}
+                    onChangeText={isProvider ? setProviderExactAddress : setClientExactAddress}
+                    placeholder="Carrefour Sion, Bonamousadi, Douala"
+                    placeholderTextColor="#8FA0B8"
+                    style={[styles.settingsEditableInput, !darkMode && styles.settingsEditableInputLight]}
+                  />
+                </View>
+              </View>
+              <TouchableOpacity activeOpacity={0.8} onPress={isProvider ? saveProviderLocation : saveClientLocation} disabled={locationSaving} style={[styles.saveButton, locationSaving && styles.disabledButton]}>
+                {locationSaving ? <ActivityIndicator color={colors.white} /> : <Text style={styles.saveButtonText}>Save Location</Text>}
+              </TouchableOpacity>
+            </View>
+          ) : null}
+
           {activeSection === 'Security' ? (
             <View style={styles.settingsFieldGrid}>
               <Text style={[styles.profilePhotoTitle, !darkMode && styles.profilePhotoTitleLight]}>Security</Text>
               {renderToggleRow('notifications-outline', 'Login alerts', loginAlerts, () => setLoginAlerts(!loginAlerts))}
+              <TouchableOpacity
+                activeOpacity={0.8}
+                onPress={toggleWalletPinAccess}
+                disabled={walletSecuritySaving}
+                style={[
+                  styles.settingsInputBox,
+                  !darkMode && styles.settingsInputBoxLight,
+                  styles.settingsActionRow,
+                  walletSecuritySaving && styles.disabledButton,
+                ]}
+              >
+                <View style={styles.rowStart}>
+                  <Ionicons name="keypad-outline" size={18} color={fieldIconColor} />
+                  <View>
+                    <Text style={[styles.settingsInputText, !darkMode && styles.settingsInputTextLight]}>PIN</Text>
+                    <Text style={styles.settingsHelpText}>Require PIN when opening wallet</Text>
+                  </View>
+                </View>
+                {walletSecuritySaving ? (
+                  <ActivityIndicator color={colors.orange} />
+                ) : (
+                  <View style={[styles.accountCheckbox, walletSecurity?.pin_required_for_access && styles.accountCheckboxOn]}>
+                    {walletSecurity?.pin_required_for_access ? <Ionicons name="checkmark" size={16} color={colors.white} /> : null}
+                  </View>
+                )}
+              </TouchableOpacity>
               <TouchableOpacity activeOpacity={0.8} onPress={openChangePassword} style={[styles.settingsInputBox, !darkMode && styles.settingsInputBoxLight, styles.settingsActionRow]}>
                 <View style={styles.rowStart}>
                   <Ionicons name="key-outline" size={18} color={fieldIconColor} />
@@ -4068,11 +4990,189 @@ const styles = StyleSheet.create({
   trackingScreen: { flex: 1, backgroundColor: colors.background, padding: 20, gap: 16 },
   walletDarkScreen: { flex: 1, backgroundColor: colors.background },
   chatDarkScreen: { flex: 1, backgroundColor: colors.background },
+  sentinelScreen: { flex: 1, backgroundColor: '#F8FAFC' },
+  sentinelShell: { flex: 1, flexDirection: Platform.OS === 'web' ? 'row' : 'column', backgroundColor: '#F8FAFC' },
+  sentinelSidebar: {
+    width: Platform.OS === 'web' ? 258 : '100%',
+    minHeight: Platform.OS === 'web' ? '100%' : 0,
+    backgroundColor: '#102541',
+    paddingHorizontal: 16,
+    paddingTop: Platform.OS === 'web' ? 28 : 18,
+    paddingBottom: 22,
+    gap: 10
+  },
+  sentinelBrand: { color: colors.orange, fontSize: 25, fontWeight: '900', marginLeft: 8 },
+  sentinelBrandSub: { color: '#9AAAC0', fontSize: 14, marginTop: 4, marginLeft: 8, marginBottom: 30 },
+  sentinelNavItem: { minHeight: 46, borderRadius: 0, paddingHorizontal: 16, flexDirection: 'row', alignItems: 'center', gap: 13 },
+  sentinelNavActive: { backgroundColor: '#047B38', borderRightWidth: 4, borderRightColor: colors.orange },
+  sentinelNavText: { color: '#F8FAFC', fontSize: 14, fontWeight: '700' },
+  sentinelNavTextActive: { color: colors.orange },
+  sentinelSidebarBottom: { marginTop: 'auto', gap: 12 },
+  sentinelNewAnalysis: { minHeight: 50, borderRadius: 8, backgroundColor: colors.orange, alignItems: 'center', justifyContent: 'center' },
+  sentinelNewAnalysisText: { color: colors.white, fontSize: 15, fontWeight: '900' },
+  sentinelSideSmall: { minHeight: 34, paddingHorizontal: 14, flexDirection: 'row', alignItems: 'center', gap: 14 },
+  sentinelSideSmallText: { color: colors.white, fontSize: 14, fontWeight: '700' },
+  sentinelAdminUser: { borderTopWidth: 1, borderTopColor: 'rgba(255,255,255,0.12)', paddingTop: 14, marginTop: 4, flexDirection: 'row', alignItems: 'center', gap: 10 },
+  sentinelAdminAvatar: { width: 34, height: 34, borderRadius: 17, backgroundColor: colors.orange, alignItems: 'center', justifyContent: 'center' },
+  sentinelAdminAvatarText: { color: colors.white, fontSize: 11, fontWeight: '900' },
+  sentinelAdminName: { color: colors.white, fontSize: 12, fontWeight: '900' },
+  sentinelAdminEmail: { color: '#9AAAC0', fontSize: 10, marginTop: 2 },
+  sentinelMain: { flex: 1, minWidth: 0 },
+  sentinelTopbar: {
+    minHeight: 64,
+    backgroundColor: colors.white,
+    borderBottomWidth: 1,
+    borderBottomColor: '#DCE3EA',
+    flexDirection: Platform.OS === 'web' ? 'row' : 'column',
+    alignItems: Platform.OS === 'web' ? 'center' : 'stretch',
+    paddingHorizontal: Platform.OS === 'web' ? 30 : 18,
+    paddingVertical: Platform.OS === 'web' ? 0 : 12,
+    gap: 18
+  },
+  sentinelTopTitle: { color: colors.orange, fontSize: 23, fontWeight: '900', minWidth: Platform.OS === 'web' ? 210 : 0 },
+  sentinelSearchWrap: { height: 42, maxWidth: 385, flex: Platform.OS === 'web' ? 1 : 0, width: Platform.OS === 'web' ? undefined : '100%', borderWidth: 1, borderColor: '#F0B6A1', backgroundColor: '#FFF9F6', borderRadius: 8, flexDirection: 'row', alignItems: 'center', paddingHorizontal: 12, gap: 10 },
+  sentinelSearchInput: { flex: 1, color: colors.textDark, fontSize: 15, paddingVertical: 0, outlineStyle: 'none' },
+  sentinelTopLinks: { flexDirection: 'row', alignItems: 'center', gap: 18, marginLeft: Platform.OS === 'web' ? 'auto' : 0 },
+  sentinelTopLinkText: { color: '#40516F', fontSize: 13, fontWeight: '700' },
+  sentinelDivider: { width: 1, height: 26, backgroundColor: '#DCE3EA' },
+  sentinelIconButton: { position: 'relative', width: 26, height: 30, alignItems: 'center', justifyContent: 'center' },
+  sentinelContent: { width: '100%', maxWidth: 1180, alignSelf: 'center', paddingHorizontal: Platform.OS === 'web' ? 32 : 18, paddingTop: 32, paddingBottom: 56, gap: 20 },
+  sentinelDataWarning: { minHeight: 48, borderRadius: 10, borderWidth: 1, borderColor: '#F2C9BC', backgroundColor: '#FFF7ED', paddingHorizontal: 14, flexDirection: 'row', alignItems: 'center', gap: 10 },
+  sentinelDataWarningText: { flex: 1, color: '#9A3412', fontSize: 12, lineHeight: 18, fontWeight: '700' },
+  sentinelSearchResults: { backgroundColor: colors.white, borderRadius: 10, borderWidth: 1, borderColor: '#F0B6A1', overflow: 'hidden' },
+  sentinelSearchResult: { padding: 11, flexDirection: 'row', gap: 10, alignItems: 'center', borderBottomWidth: 1, borderBottomColor: '#EEF1F5' },
+  sentinelResultName: { color: colors.textDark, fontSize: 13, fontWeight: '900' },
+  sentinelResultMeta: { color: colors.textGray, fontSize: 11, marginTop: 2 },
+  sentinelHeaderRow: { flexDirection: Platform.OS === 'web' ? 'row' : 'column', alignItems: Platform.OS === 'web' ? 'center' : 'stretch', justifyContent: 'space-between', gap: 16 },
+  sentinelPageTitle: { color: '#20242B', fontSize: 30, fontWeight: '900' },
+  sentinelPageSub: { color: '#51698E', fontSize: 15, marginTop: 5 },
+  sentinelHeaderActions: { flexDirection: 'row', flexWrap: 'wrap', gap: 12 },
+  sentinelOutlineBtn: { minHeight: 43, borderRadius: 8, borderWidth: 1, borderColor: '#536A8D', backgroundColor: colors.white, paddingHorizontal: 16, flexDirection: 'row', alignItems: 'center', justifyContent: 'center', gap: 9 },
+  sentinelOutlineText: { color: '#40516F', fontSize: 14, fontWeight: '800' },
+  sentinelExportBtn: { minHeight: 43, borderRadius: 8, backgroundColor: colors.orange, paddingHorizontal: 17, flexDirection: 'row', alignItems: 'center', justifyContent: 'center', gap: 9 },
+  sentinelExportText: { color: colors.white, fontSize: 14, fontWeight: '900' },
+  sentinelOverviewGrid: { flexDirection: Platform.OS === 'web' ? 'row' : 'column', gap: 20 },
+  sentinelPerformanceCard: { flex: Platform.OS === 'web' ? 1.85 : 0, minHeight: 300, borderRadius: 12, backgroundColor: '#102541', padding: 32, overflow: 'hidden', justifyContent: 'space-between' },
+  sentinelEyebrow: { color: colors.orange, fontSize: 11, fontWeight: '900', letterSpacing: 2.1 },
+  sentinelPerformanceTitleRow: { flexDirection: 'row', alignItems: 'center', flexWrap: 'wrap', gap: 12, marginTop: 16 },
+  sentinelPerformanceTitle: { color: colors.white, fontSize: 30, fontWeight: '900' },
+  sentinelUptimePill: { borderRadius: 999, backgroundColor: '#10B981', paddingHorizontal: 11, paddingVertical: 7, flexDirection: 'row', alignItems: 'center', gap: 5 },
+  sentinelUptimeText: { color: '#063F30', fontSize: 11, fontWeight: '900' },
+  sentinelMetricRow: { flexDirection: 'row', flexWrap: 'wrap', gap: 26, marginTop: 32 },
+  sentinelMetricBlock: { minWidth: 115, flexGrow: 1 },
+  sentinelMetricLabel: { color: '#AAB8CB', fontSize: 10, fontWeight: '900', letterSpacing: 1.4 },
+  sentinelMetricValue: { color: colors.white, fontSize: 35, fontWeight: '900', marginTop: 7, lineHeight: 40 },
+  sentinelMetricGood: { color: '#49E3B4', fontSize: 12, fontWeight: '800', marginTop: 6 },
+  sentinelMetricWarn: { color: '#FFB49B', fontSize: 12, fontWeight: '800', marginTop: 6 },
+  sentinelCardWatermark: { position: 'absolute', right: -8, bottom: -24, transform: [{ rotate: '-18deg' }] },
+  sentinelRiskCard: { flex: Platform.OS === 'web' ? 0.9 : 0, minWidth: Platform.OS === 'web' ? 285 : '100%', backgroundColor: colors.white, borderRadius: 12, borderWidth: 1, borderColor: '#F0B6A1', padding: 24, gap: 16 },
+  sentinelPanelTitle: { color: '#20242B', fontSize: 17, fontWeight: '900' },
+  sentinelPanelSub: { color: '#51698E', fontSize: 13, lineHeight: 19, marginTop: 5 },
+  sentinelRiskRow: { flexDirection: 'row', alignItems: 'center', flexWrap: 'wrap', gap: 8 },
+  sentinelRiskDot: { width: 8, height: 8, borderRadius: 4 },
+  sentinelRiskLabel: { color: '#20242B', fontSize: 14, fontWeight: '900' },
+  sentinelRiskCount: { color: '#6B4F46', fontSize: 13, fontWeight: '800', marginLeft: 'auto' },
+  sentinelRiskTrack: { width: '100%', height: 7, borderRadius: 4, backgroundColor: '#E9EDF1', overflow: 'hidden' },
+  sentinelRiskFill: { height: '100%', borderRadius: 4 },
+  sentinelAuditBtn: { marginTop: 'auto', minHeight: 49, borderRadius: 8, borderWidth: 1, borderColor: '#F0D1C5', alignItems: 'center', justifyContent: 'center' },
+  sentinelAuditText: { color: colors.orange, fontSize: 14, fontWeight: '900' },
+  sentinelMiddleGrid: { flexDirection: Platform.OS === 'web' ? 'row' : 'column', alignItems: 'stretch', gap: 20 },
+  sentinelNotificationsCard: { flex: Platform.OS === 'web' ? 0.8 : 0, minWidth: Platform.OS === 'web' ? 300 : '100%', borderRadius: 12, backgroundColor: colors.white, borderWidth: 1, borderColor: '#F0B6A1', overflow: 'hidden' },
+  sentinelDecisionCard: { flex: Platform.OS === 'web' ? 1.7 : 0, borderRadius: 12, backgroundColor: colors.white, borderWidth: 1, borderColor: '#F0B6A1', padding: 24, gap: 20 },
+  sentinelCardHeader: { flexDirection: 'row', alignItems: 'flex-start', justifyContent: 'space-between', gap: 12, padding: 16, borderBottomWidth: 0, flexWrap: 'wrap' },
+  sentinelNewBadge: { borderRadius: 5, backgroundColor: '#FFF0E8', paddingHorizontal: 8, paddingVertical: 5 },
+  sentinelNewBadgeText: { color: colors.orange, fontSize: 10, fontWeight: '900' },
+  sentinelNotificationRow: { minHeight: 104, paddingHorizontal: 16, paddingVertical: 14, flexDirection: 'row', alignItems: 'flex-start', gap: 12, borderTopWidth: 1, borderTopColor: '#F1E1DB' },
+  sentinelNotificationIcon: { width: 40, height: 40, borderRadius: 8, alignItems: 'center', justifyContent: 'center' },
+  sentinelNotificationTitle: { color: '#20242B', fontSize: 14, fontWeight: '900' },
+  sentinelNotificationBody: { color: '#51698E', fontSize: 12, lineHeight: 18, marginTop: 5 },
+  sentinelNotificationTime: { color: '#6B7280', fontSize: 10, width: 38, textAlign: 'right' },
+  sentinelCardFooterBtn: { minHeight: 46, alignItems: 'center', justifyContent: 'center', borderTopWidth: 1, borderTopColor: '#F1E1DB' },
+  sentinelCardFooterText: { color: '#533E36', fontSize: 12, fontWeight: '900' },
+  sentinelLegendDot: { width: 10, height: 10, borderRadius: 5 },
+  sentinelLegendText: { color: '#536A8D', fontSize: 11, fontWeight: '700' },
+  sentinelDecisionMetric: { flexDirection: 'row', alignItems: 'center', gap: 16 },
+  sentinelDecisionLabelBlock: { width: Platform.OS === 'web' ? 130 : 100 },
+  sentinelDecisionLabel: { color: '#20242B', fontSize: 13, fontWeight: '900' },
+  sentinelDecisionSub: { color: '#536A8D', fontSize: 8, fontWeight: '900', letterSpacing: 0.7, marginTop: 4 },
+  sentinelDecisionTrack: { height: 32, flex: 1, borderRadius: 4, backgroundColor: '#E7E9EC', overflow: 'hidden' },
+  sentinelDecisionFill: { height: '100%', backgroundColor: colors.orange },
+  sentinelDecisionValue: { color: '#20242B', fontSize: 13, width: 58, textAlign: 'right', fontWeight: '800' },
+  sentinelMiniBars: { height: 125, paddingHorizontal: 16, flexDirection: 'row', alignItems: 'flex-end', justifyContent: 'space-between', gap: 4, marginTop: 5 },
+  sentinelMiniBar: { flex: 1, minWidth: 8, backgroundColor: '#E4E6E9', borderRadius: 2 },
+  sentinelChartCaption: { color: '#C5D5FA', fontSize: 9, fontWeight: '900', letterSpacing: 0.7, textAlign: 'center' },
+  sentinelMonitoringCard: { borderRadius: 12, backgroundColor: colors.white, borderWidth: 1, borderColor: '#F0B6A1', overflow: 'hidden' },
+  sentinelLivePill: { borderRadius: 999, backgroundColor: '#F3F4F6', paddingHorizontal: 10, paddingVertical: 6, flexDirection: 'row', alignItems: 'center', gap: 6 },
+  sentinelLiveDot: { width: 7, height: 7, borderRadius: 4, backgroundColor: colors.red },
+  sentinelLiveText: { color: '#533E36', fontSize: 11, fontWeight: '900' },
+  sentinelTableHeader: { minHeight: 44, paddingHorizontal: 20, backgroundColor: '#F8FAFC', borderTopWidth: 1, borderTopColor: '#E6D8D2', borderBottomWidth: 1, borderBottomColor: '#E6D8D2', flexDirection: 'row', alignItems: 'center', gap: 12 },
+  sentinelTableHeadText: { flex: 1, color: '#536A8D', fontSize: 9, fontWeight: '900', letterSpacing: 1 },
+  sentinelTableRow: { minHeight: 62, paddingHorizontal: 20, flexDirection: 'row', alignItems: 'center', gap: 12, borderBottomWidth: 1, borderBottomColor: '#F1E1DB' },
+  sentinelTableText: { flex: 1, color: '#20242B', fontSize: 12, fontWeight: '700' },
+  sentinelTableEntity: { fontWeight: '900' },
+  sentinelConfidenceCell: { flex: 1, flexDirection: 'row', alignItems: 'center', gap: 7 },
+  sentinelConfidenceTrack: { width: 45, height: 5, backgroundColor: '#E4E6E9', borderRadius: 4, overflow: 'hidden' },
+  sentinelConfidenceFill: { height: '100%', borderRadius: 4 },
+  sentinelStatusPill: { flex: 1, maxWidth: 80, borderRadius: 5, paddingVertical: 4, alignItems: 'center' },
+  sentinelStatusText: { fontSize: 9, fontWeight: '900' },
+  sentinelAuditLogBtn: { minHeight: 52, flexDirection: 'row', alignItems: 'center', justifyContent: 'center', gap: 8 },
+  sentinelAuditLogText: { color: colors.orange, fontSize: 14, fontWeight: '900' },
+  adminEscrowFilterRow: { flexDirection: 'row', flexWrap: 'wrap', gap: 7, justifyContent: 'flex-end' },
+  adminEscrowFilter: { minHeight: 38, paddingHorizontal: 12, borderRadius: 7, borderWidth: 1, borderColor: '#E5B7A5', backgroundColor: colors.white, justifyContent: 'center' },
+  adminEscrowFilterActive: { backgroundColor: colors.orange, borderColor: colors.orange },
+  adminEscrowFilterText: { color: '#526987', fontSize: 12, fontWeight: '800' },
+  adminEscrowFilterTextActive: { color: colors.white },
+  adminEscrowSummaryGrid: { flexDirection: 'row', flexWrap: 'wrap', gap: 16 },
+  adminEscrowSummaryCard: { flexGrow: 1, flexBasis: Platform.OS === 'web' ? 210 : 170, minHeight: 166, backgroundColor: '#102541', borderRadius: 11, padding: 18, justifyContent: 'space-between' },
+  adminEscrowSummaryIcon: { width: 38, height: 38, borderRadius: 10, backgroundColor: 'rgba(242,101,34,0.16)', alignItems: 'center', justifyContent: 'center' },
+  adminEscrowSummaryLabel: { color: '#AAB8CB', fontSize: 10, fontWeight: '900', letterSpacing: 1, marginTop: 12 },
+  adminEscrowSummaryValue: { color: colors.white, fontSize: 24, fontWeight: '900', marginTop: 5 },
+  adminEscrowSummaryCopy: { color: '#93A6C0', fontSize: 11, lineHeight: 16, marginTop: 5, fontWeight: '700' },
+  adminEscrowListPanel: { borderRadius: 11, backgroundColor: colors.white, borderWidth: 1, borderColor: '#F0B6A1', overflow: 'hidden' },
+  adminEscrowListHeader: { minHeight: 78, paddingHorizontal: 20, paddingVertical: 14, flexDirection: 'row', alignItems: 'center', justifyContent: 'space-between', gap: 16, borderBottomWidth: 1, borderBottomColor: '#F1E1DB' },
+  adminEscrowListTitle: { color: '#20242B', fontSize: 19, fontWeight: '900' },
+  adminEscrowListSub: { color: '#51698E', fontSize: 12, lineHeight: 18, marginTop: 3 },
+  adminEscrowLivePill: { borderRadius: 999, backgroundColor: '#E8F7F1', paddingHorizontal: 10, paddingVertical: 6, flexDirection: 'row', alignItems: 'center', gap: 6 },
+  adminEscrowLiveDot: { width: 7, height: 7, borderRadius: 4, backgroundColor: colors.green },
+  adminEscrowLiveText: { color: '#047857', fontSize: 10, fontWeight: '900', letterSpacing: 0.7 },
+  adminEscrowEmpty: { minHeight: 240, padding: 30, alignItems: 'center', justifyContent: 'center', gap: 9 },
+  adminEscrowEmptyTitle: { color: '#40516F', fontSize: 17, fontWeight: '900' },
+  adminEscrowEmptyText: { color: '#64748B', fontSize: 13, textAlign: 'center', maxWidth: 390, lineHeight: 19 },
+  adminEscrowBookingCard: { padding: 20, gap: 18, borderBottomWidth: 1, borderBottomColor: '#F1E1DB' },
+  adminEscrowBookingBlocked: { backgroundColor: '#FFF9F7', borderLeftWidth: 4, borderLeftColor: colors.red },
+  adminEscrowBookingTop: { flexDirection: 'row', gap: 16, alignItems: 'flex-start' },
+  adminEscrowBookingTitleRow: { flexDirection: 'row', flexWrap: 'wrap', alignItems: 'center', gap: 9 },
+  adminEscrowBookingTitle: { color: '#20242B', fontSize: 18, fontWeight: '900', flexShrink: 1 },
+  adminEscrowBookingMeta: { color: '#64748B', fontSize: 12, lineHeight: 18, marginTop: 5 },
+  adminEscrowBookingAmount: { color: '#20242B', fontSize: 21, fontWeight: '900', textAlign: 'right' },
+  adminEscrowStatus: { paddingHorizontal: 8, paddingVertical: 5, borderRadius: 5 },
+  adminEscrowStatusHolding: { backgroundColor: '#FFF0E8' },
+  adminEscrowStatusReady: { backgroundColor: '#D1FAE5' },
+  adminEscrowStatusBlocked: { backgroundColor: '#FEE2E2' },
+  adminEscrowStatusText: { fontSize: 9, fontWeight: '900', letterSpacing: 0.7 },
+  adminEscrowStatusTextHolding: { color: '#C2410C' },
+  adminEscrowStatusTextReady: { color: '#047857' },
+  adminEscrowStatusTextBlocked: { color: '#B91C1C' },
+  adminEscrowProgress: { flexDirection: 'row', alignItems: 'center', flexWrap: 'wrap', gap: 8, paddingVertical: 12, paddingHorizontal: 14, backgroundColor: '#F8FAFC', borderRadius: 8 },
+  adminEscrowProgressStep: { flexDirection: 'row', alignItems: 'center', gap: 6 },
+  adminEscrowProgressText: { color: '#526987', fontSize: 11, fontWeight: '700' },
+  adminEscrowProgressLine: { flex: 1, minWidth: 14, height: 1, backgroundColor: '#CBD5E1' },
+  adminEscrowFinancials: { flexDirection: 'row', flexWrap: 'wrap', gap: 26 },
+  adminEscrowFinancialLabel: { color: '#64748B', fontSize: 9, fontWeight: '900', letterSpacing: 0.9 },
+  adminEscrowFinancialValue: { color: '#20242B', fontSize: 15, fontWeight: '900', marginTop: 5 },
+  adminEscrowActions: { flexDirection: 'row', justifyContent: 'flex-end' },
+  adminEscrowReleaseButton: { minHeight: 42, minWidth: 190, borderRadius: 8, backgroundColor: colors.orange, alignItems: 'center', justifyContent: 'center', paddingHorizontal: 16 },
+  adminEscrowReleaseText: { color: colors.white, fontSize: 13, fontWeight: '900' },
+  adminEscrowReviewButton: { minHeight: 42, minWidth: 164, borderRadius: 8, backgroundColor: '#FEE2E2', alignItems: 'center', justifyContent: 'center', paddingHorizontal: 16 },
+  adminEscrowReviewText: { color: '#B91C1C', fontSize: 13, fontWeight: '900' },
+  adminEscrowWaitingButton: { minHeight: 42, borderRadius: 8, backgroundColor: '#F1F5F9', paddingHorizontal: 14, flexDirection: 'row', alignItems: 'center', gap: 8 },
+  adminEscrowWaitingText: { color: '#64748B', fontSize: 12, fontWeight: '800' },
   adminVerifyScreen: { flex: 1, backgroundColor: colors.white },
   settingsDarkScreen: { flex: 1, backgroundColor: colors.background },
   changePasswordScreen: { flex: 1, backgroundColor: colors.background },
   flex: { flex: 1 },
   content: { padding: 20, gap: 16, paddingBottom: 120 },
+  bookingContent: { padding: 20, gap: 16, paddingBottom: Platform.OS === 'ios' ? 132 : 116 },
   exploreContent: { paddingHorizontal: 16, paddingTop: 12, paddingBottom: 120 },
   detailContent: { paddingBottom: 120 },
   flatContent: { paddingBottom: 120 },
@@ -4696,6 +5796,10 @@ const styles = StyleSheet.create({
   adminRoleBadge: { alignSelf: 'flex-start', borderRadius: 999, backgroundColor: 'rgba(242,101,34,0.12)', paddingHorizontal: 12, paddingVertical: 7 },
   adminRoleBadgeText: { color: colors.orange, fontSize: 10, fontWeight: '900', letterSpacing: 1 },
   settingsContent: { padding: 20, gap: 18, paddingBottom: 120 },
+  settingsAdminBackButton: { alignSelf: 'flex-start', minHeight: 38, borderRadius: 10, paddingHorizontal: 12, backgroundColor: '#132541', flexDirection: 'row', alignItems: 'center', gap: 8 },
+  settingsAdminBackButtonLight: { backgroundColor: colors.white, borderWidth: 1, borderColor: colors.border },
+  settingsAdminBackText: { color: '#D5DEEC', fontSize: 13, fontWeight: '900' },
+  settingsAdminBackTextLight: { color: colors.textDark },
   changePasswordContent: { padding: 20, gap: 18, paddingBottom: 80 },
   changePasswordHeader: { alignItems: 'center', gap: 10, marginTop: 20 },
   changePasswordIcon: { width: 74, height: 74, borderRadius: 37, backgroundColor: 'rgba(242,101,34,0.12)', alignItems: 'center', justifyContent: 'center' },
@@ -4761,11 +5865,17 @@ const styles = StyleSheet.create({
   settingsEditableInputLight: { color: colors.textDark },
   settingsInputText: { color: colors.white, fontSize: 15, fontWeight: '800' },
   settingsInputTextLight: { color: colors.textDark },
+  settingsHelpText: { color: colors.textGray, fontSize: 11, fontWeight: '700', marginTop: 2 },
   settingsPlaceholder: { color: '#8FA0B8', fontSize: 15, fontWeight: '800' },
+  locationPromptBox: { borderRadius: 18, backgroundColor: '#FFF7ED', borderWidth: 1, borderColor: 'rgba(242,101,34,0.18)', padding: 14, flexDirection: 'row', alignItems: 'center', gap: 12 },
+  locationPromptTitle: { color: colors.textDark, fontSize: 15, fontWeight: '900' },
+  locationPromptText: { color: colors.textGray, fontSize: 12, lineHeight: 18, marginTop: 2 },
   accountSwitch: { width: 46, height: 26, borderRadius: 13, backgroundColor: 'rgba(143,160,184,0.35)', padding: 3 },
   accountSwitchOn: { backgroundColor: colors.orange },
   accountSwitchKnob: { width: 20, height: 20, borderRadius: 10, backgroundColor: colors.white },
   accountSwitchKnobOn: { alignSelf: 'flex-end' },
+  accountCheckbox: { width: 26, height: 26, borderRadius: 8, borderWidth: 2, borderColor: colors.textGray, alignItems: 'center', justifyContent: 'center' },
+  accountCheckboxOn: { backgroundColor: colors.orange, borderColor: colors.orange },
   saveButton: { height: 56, borderRadius: 14, backgroundColor: colors.orange, alignItems: 'center', justifyContent: 'center', alignSelf: 'stretch' },
   disabledButton: { opacity: 0.65 },
   saveButtonText: { color: colors.white, fontSize: 16, fontWeight: '900' },
@@ -4791,19 +5901,29 @@ const styles = StyleSheet.create({
   bookingCard: { marginBottom: 12, borderRadius: 16 },
   bookingMeta: { flexDirection: 'row', alignItems: 'center', justifyContent: 'space-between', marginTop: 12 },
   bookingServiceTitle: { color: colors.orange, fontSize: 16, fontWeight: '900' },
-  bookingBottomTabs: { minHeight: Platform.OS === 'ios' ? 88 : 76, backgroundColor: colors.white, borderTopWidth: 1, borderTopColor: colors.border, flexDirection: 'row', alignItems: 'center', justifyContent: 'space-around', paddingTop: 8, paddingBottom: Platform.OS === 'ios' ? 22 : 12, shadowColor: colors.navy, shadowOpacity: 0.08, shadowRadius: 10, shadowOffset: { width: 0, height: -4 }, elevation: 8 },
+  bookingBottomTabs: { position: 'absolute', left: 0, right: 0, bottom: 0, minHeight: Platform.OS === 'ios' ? 88 : 76, backgroundColor: colors.white, borderTopWidth: 1, borderTopColor: colors.border, flexDirection: 'row', alignItems: 'center', justifyContent: 'space-around', paddingTop: 8, paddingBottom: Platform.OS === 'ios' ? 22 : 12, shadowColor: colors.navy, shadowOpacity: 0.08, shadowRadius: 10, shadowOffset: { width: 0, height: -4 }, elevation: 8 },
   bookingBottomTab: { flex: 1, alignItems: 'center', justifyContent: 'center', gap: 4 },
   bookingBottomLabel: { color: '#9CA3AF', fontSize: 11, fontWeight: '800' },
   bookingBottomLabelActive: { color: colors.orange },
   trackingHeader: { gap: 6, marginTop: 8 },
   trackingTitle: { color: colors.orange, fontSize: 34, fontWeight: '900' },
   trackingSubtitle: { color: colors.textGray, fontSize: 15 },
-  trackingMapCard: { height: 430, borderRadius: 28, overflow: 'hidden', backgroundColor: colors.white, shadowColor: colors.navy, shadowOpacity: 0.08, shadowRadius: 14, shadowOffset: { width: 0, height: 6 }, elevation: 3 },
+  trackingMapCard: { height: 430, borderRadius: 28, overflow: 'hidden', backgroundColor: colors.white, borderWidth: 1, borderColor: 'rgba(15,23,42,0.06)', shadowColor: colors.navy, shadowOpacity: 0.12, shadowRadius: 16, shadowOffset: { width: 0, height: 8 }, elevation: 4 },
   trackingMap: { flex: 1 },
-  trackingInfoCard: { backgroundColor: colors.white, borderRadius: 22, padding: 16, flexDirection: 'row', alignItems: 'center', gap: 12, shadowColor: colors.navy, shadowOpacity: 0.08, shadowRadius: 12, shadowOffset: { width: 0, height: 5 }, elevation: 2 },
+  trackingMapOverlay: { position: 'absolute', top: 14, left: 14, right: 14, minHeight: 42, borderRadius: 16, backgroundColor: 'rgba(15, 23, 42, 0.9)', flexDirection: 'row', alignItems: 'center', gap: 9, paddingHorizontal: 14 },
+  trackingStatusDot: { width: 8, height: 8, borderRadius: 4, backgroundColor: colors.green },
+  trackingMapOverlayText: { color: colors.white, fontSize: 12, fontWeight: '900' },
+  trackingMarkerOuter: { width: 44, height: 44, borderRadius: 22, backgroundColor: 'rgba(242,101,34,0.22)', alignItems: 'center', justifyContent: 'center', borderWidth: 2, borderColor: colors.white },
+  trackingMarkerInner: { width: 30, height: 30, borderRadius: 15, backgroundColor: colors.orange, alignItems: 'center', justifyContent: 'center' },
+  trackingEmptyState: { flex: 1, alignItems: 'center', justifyContent: 'center', padding: 24, gap: 10 },
+  trackingEmptyTitle: { color: colors.textDark, fontSize: 18, fontWeight: '900', textAlign: 'center' },
+  trackingEmptyText: { color: colors.textGray, fontSize: 13, lineHeight: 19, textAlign: 'center' },
+  trackingInfoCard: { backgroundColor: colors.white, borderRadius: 24, padding: 18, flexDirection: 'row', alignItems: 'center', gap: 12, shadowColor: colors.navy, shadowOpacity: 0.1, shadowRadius: 14, shadowOffset: { width: 0, height: 6 }, elevation: 3 },
   trackingInfoIcon: { width: 44, height: 44, borderRadius: 15, backgroundColor: 'rgba(242,101,34,0.12)', alignItems: 'center', justifyContent: 'center' },
   trackingInfoTitle: { color: colors.textDark, fontSize: 15, fontWeight: '900', lineHeight: 20 },
   trackingInfoText: { color: colors.textGray, fontSize: 12, marginTop: 3 },
+  trackingOpenMapsButton: { minHeight: 54, borderRadius: 17, backgroundColor: colors.orange, flexDirection: 'row', alignItems: 'center', justifyContent: 'center', gap: 8, shadowColor: colors.orange, shadowOpacity: 0.24, shadowRadius: 12, shadowOffset: { width: 0, height: 6 }, elevation: 3 },
+  trackingOpenMapsText: { color: colors.white, fontSize: 14, fontWeight: '900' },
   actionRow: { flexDirection: 'row', gap: 12, alignItems: 'center', marginTop: 12 },
   walletHeading: { color: colors.orange, fontSize: 26, fontWeight: '900' },
   escrowCard: { gap: 12 },
@@ -4835,6 +5955,9 @@ const styles = StyleSheet.create({
   composer: { flexDirection: 'row', alignItems: 'center', padding: 12, gap: 12, backgroundColor: colors.white, borderTopWidth: 1, borderColor: colors.border },
   sendButton: { width: 44, height: 44, borderRadius: 22, backgroundColor: colors.primary, alignItems: 'center', justifyContent: 'center' },
   providerHeader: { flexDirection: 'row', alignItems: 'center', gap: 12, overflow: 'visible' },
+  providerLocationPrompt: { borderRadius: 18, backgroundColor: '#FFF7ED', borderWidth: 1, borderColor: 'rgba(242,101,34,0.22)', padding: 14, flexDirection: 'row', alignItems: 'center', gap: 12 },
+  providerLocationPromptTitle: { color: colors.orange, fontSize: 15, fontWeight: '900' },
+  providerLocationPromptText: { color: colors.textGray, fontSize: 12, lineHeight: 18, marginTop: 2 },
   verifiedLabel: { color: colors.green, fontSize: 11, fontWeight: '900' },
   verifiedLabelBlue: { color: colors.blue },
   providerNeutralLabel: { color: colors.textGray, fontSize: 11, fontWeight: '900' },

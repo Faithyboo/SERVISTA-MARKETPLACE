@@ -5,7 +5,7 @@ from rest_framework.views import APIView
 from rest_framework.permissions import IsAuthenticated, AllowAny
 from rest_framework.parsers import FormParser, JSONParser, MultiPartParser
 from bookings.models import Booking
-from .models import Service
+from .models import Service, ServiceReview
 from .serializers import ServiceReviewSerializer, ServiceSerializer
 
 
@@ -114,7 +114,9 @@ class ServiceReviewListCreateView(APIView):
         service = self.get_service(service_id)
         if not service:
             return Response({'error': 'Service not found'}, status=status.HTTP_404_NOT_FOUND)
-        reviews = service.reviews.select_related('client', 'provider', 'service')
+        reviews = ServiceReview.objects.filter(provider=service.provider).select_related(
+            'client', 'provider', 'service'
+        )
         return Response(ServiceReviewSerializer(reviews, many=True).data)
 
     def post(self, request, service_id):
@@ -125,9 +127,11 @@ class ServiceReviewListCreateView(APIView):
             return Response({'error': 'Service not found'}, status=status.HTTP_404_NOT_FOUND)
         booking_id = request.data.get('booking')
         try:
-            booking = Booking.objects.select_related('service__provider', 'client').get(pk=booking_id, service=service)
+            booking = Booking.objects.select_related('service__provider', 'client').get(pk=booking_id)
         except Booking.DoesNotExist:
-            return Response({'error': 'Booking not found for this service'}, status=status.HTTP_404_NOT_FOUND)
+            return Response({'error': 'Booking not found'}, status=status.HTTP_404_NOT_FOUND)
+        if booking.service.provider != service.provider:
+            return Response({'error': 'Booking does not belong to this provider'}, status=status.HTTP_403_FORBIDDEN)
         if booking.client != request.user:
             return Response({'error': 'Only the client who booked this service can review it'}, status=status.HTTP_403_FORBIDDEN)
         if not (booking.status == 'completed' or booking.client_confirmed_at or booking.payment_status == 'released'):
@@ -137,7 +141,7 @@ class ServiceReviewListCreateView(APIView):
         serializer = ServiceReviewSerializer(data=request.data)
         if serializer.is_valid():
             serializer.save(
-                service=service,
+                service=booking.service,
                 booking=booking,
                 client=request.user,
                 provider=service.provider,

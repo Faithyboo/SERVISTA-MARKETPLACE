@@ -4,7 +4,7 @@ from django.utils import timezone
 from rest_framework import status
 from rest_framework.test import APITestCase
 from services.models import Service
-from users.models import ProviderProfile, User
+from users.models import Notification, ProviderProfile, User
 from wallet.models import Transaction
 from .models import Booking
 
@@ -58,8 +58,13 @@ class MarketplaceWorkflowTests(APITestCase):
         self.client_user.wallet.refresh_from_db()
         self.provider.wallet.refresh_from_db()
         self.assertEqual(self.client_user.wallet.balance, Decimal('1000.00'))
-        self.assertEqual(self.provider.wallet.balance, Decimal('5000.00'))
-        self.assertEqual(Transaction.objects.filter(booking=booking, type='payment').count(), 2)
+        self.assertEqual(self.provider.wallet.balance, Decimal('0.00'))
+        self.assertEqual(Transaction.objects.filter(booking=booking, type='payment').count(), 1)
+        self.assertTrue(Notification.objects.filter(
+            user=self.provider,
+            title='Client payment received',
+            is_read=False,
+        ).exists())
 
         duplicate = self.client.post(reverse('wallet-payment', args=[booking.pk]), {'pin': '1234'}, format='json')
         self.assertEqual(duplicate.status_code, status.HTTP_400_BAD_REQUEST)
@@ -82,7 +87,11 @@ class MarketplaceWorkflowTests(APITestCase):
         self.client.force_authenticate(self.provider)
         profile_response = self.client.post(
             reverse('provider-profile'),
-            {'business_name': 'Reliable Repairs', 'bio': 'Local plumbing services'},
+            {
+                'business_name': 'Reliable Repairs',
+                'bio': 'Local plumbing services',
+                'city_area': 'Douala, Bonamousadi',
+            },
             format='json',
         )
         self.assertEqual(profile_response.status_code, status.HTTP_201_CREATED)

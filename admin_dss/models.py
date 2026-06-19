@@ -190,3 +190,24 @@ class BatchVerification(models.Model):
             from django.utils import timezone
             self.batch_id = f'VER-{timezone.now().strftime("%Y%m%d%H%M%S")}'
         super().save(*args, **kwargs)
+
+
+class AIAnalysisRun(models.Model):
+    """Persistent audit trail for admin-triggered AI decision-support runs."""
+    ACTION_CHOICES = [
+        ('integrity_review', 'Integrity Review'),
+        ('score_recalculation', 'Score Recalculation'),
+    ]
+
+    admin = models.ForeignKey(
+        User, on_delete=models.SET_NULL, null=True, related_name='ai_analysis_runs'
+    )
+    action = models.CharField(max_length=30, choices=ACTION_CHOICES)
+    snapshot = models.JSONField(default=dict)
+    created_at = models.DateTimeField(auto_now_add=True)
+
+    class Meta:
+        ordering = ['-created_at']
+
+    def __str__(self):
+        return f'{self.get_action_display()} at {self.created_at:%Y-%m-%d %H:%M}'

@@ -6,6 +6,7 @@ from rest_framework.permissions import IsAuthenticated
 from rest_framework.response import Response
 from rest_framework.views import APIView
 from bookings.models import Booking
+from users.models import Notification
 from .models import Transaction, Wallet
 from .serializers import TopUpSerializer, WalletPinResetDecisionSerializer, WalletPinSerializer, WalletSerializer
 from .utils import get_reconciled_wallet, reconcile_wallet_balance
@@ -101,7 +102,11 @@ class WalletPinPreferenceView(APIView):
 
     def patch(self, request):
         wallet = get_wallet(request.user)
-        required = bool(request.data.get('pin_required_for_access', False))
+        raw_required = request.data.get('pin_required_for_access', False)
+        if isinstance(raw_required, str):
+            required = raw_required.lower() in ['true', '1', 'yes', 'on']
+        else:
+            required = bool(raw_required)
         if required and not wallet.pin_hash:
             return Response(
                 {'error': 'Set a wallet PIN before requiring PIN access.'},
@@ -194,5 +199,16 @@ class WalletPaymentView(APIView):
             booking.payment_status = 'escrowed'
             booking.refund_status = 'none'
             booking.save(update_fields=['payment_status', 'refund_status'])
+            Notification.objects.create(
+                user=booking.service.provider,
+                title='Client payment received',
+                message=f'{request.user.full_name or "A client"} has paid for {booking.service.title}.',
+                detail=(
+                    f'{booking.amount} FCFA is being held securely in Servista escrow. '
+                    'The payout will remain in escrow until the job is completed and confirmed.'
+                ),
+                icon='wallet-outline',
+                tone='success',
+            )
             client_wallet = reconcile_wallet_balance(client_wallet)
         return Response({'message': 'Payment successful', 'wallet': WalletSerializer(client_wallet).data})

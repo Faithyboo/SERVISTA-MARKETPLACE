@@ -12,6 +12,10 @@ class BookingSerializer(serializers.ModelSerializer):
     provider_photo = serializers.ImageField(source='service.provider.profile_photo', read_only=True)
     provider_last_seen = serializers.DateTimeField(source='service.provider.last_seen', read_only=True, allow_null=True)
     provider_badge_verification_status = serializers.SerializerMethodField()
+    provider_city_area = serializers.SerializerMethodField()
+    provider_exact_address = serializers.SerializerMethodField()
+    provider_latitude = serializers.SerializerMethodField()
+    provider_longitude = serializers.SerializerMethodField()
     client_name = serializers.CharField(source='client.full_name', read_only=True)
     client_photo = serializers.ImageField(source='client.profile_photo', read_only=True)
     client_last_seen = serializers.DateTimeField(source='client.last_seen', read_only=True, allow_null=True)
@@ -29,13 +33,33 @@ class BookingSerializer(serializers.ModelSerializer):
         profile = getattr(obj.service.provider, 'provider_profile', None)
         return getattr(profile, 'badge_verification_status', 'not_verified')
 
+    def get_provider_profile(self, obj):
+        return getattr(obj.service.provider, 'provider_profile', None)
+
+    def get_provider_city_area(self, obj):
+        profile = self.get_provider_profile(obj)
+        return getattr(profile, 'city_area', '') or ''
+
+    def get_provider_exact_address(self, obj):
+        profile = self.get_provider_profile(obj)
+        return getattr(profile, 'address', '') or ''
+
+    def get_provider_latitude(self, obj):
+        profile = self.get_provider_profile(obj)
+        return getattr(profile, 'latitude', None)
+
+    def get_provider_longitude(self, obj):
+        profile = self.get_provider_profile(obj)
+        return getattr(profile, 'longitude', None)
+
     class Meta:
         model = Booking
         fields = [
             'id', 'client', 'client_name', 'service', 'service_title',
             'service_address', 'service_latitude', 'service_longitude',
             'provider', 'provider_name', 'provider_photo', 'provider_last_seen',
-            'provider_badge_verification_status',
+            'provider_badge_verification_status', 'provider_city_area',
+            'provider_exact_address', 'provider_latitude', 'provider_longitude',
             'client_photo', 'client_last_seen',
             'status', 'payment_status', 'refund_status', 'refund_requested_at',
             'provider_marked_completed_at', 'client_confirmed_at', 'issue_reported_at',

@@ -234,7 +234,7 @@ class ProviderProfileView(APIView):
         if request.user.role != 'provider':
             return Response({'error': 'Only providers can manage a provider profile'}, status=status.HTTP_403_FORBIDDEN)
         profile = ProviderProfile.objects.filter(user=request.user).first()
-        serializer = ProviderProfileSerializer(profile, data=request.data, partial=profile is not None)
+        serializer = ProviderProfileSerializer(profile, data=request.data, partial=profile is not None, context={'request': request})
         if serializer.is_valid():
             serializer.save(user=request.user)
             return Response(serializer.data, status=status.HTTP_200_OK if profile else status.HTTP_201_CREATED)

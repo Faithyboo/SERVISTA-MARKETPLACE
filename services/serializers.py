@@ -32,11 +32,11 @@ class ServiceSerializer(serializers.ModelSerializer):
     completed_booking_count = serializers.SerializerMethodField()
 
     def get_average_rating(self, obj):
-        value = obj.reviews.aggregate(avg=Avg('rating'))['avg']
+        value = ServiceReview.objects.filter(provider=obj.provider).aggregate(avg=Avg('rating'))['avg']
         return round(value, 1) if value is not None else None
 
     def get_review_count(self, obj):
-        return obj.reviews.count()
+        return ServiceReview.objects.filter(provider=obj.provider).count()
 
     def get_booking_count(self, obj):
         return obj.bookings.count()

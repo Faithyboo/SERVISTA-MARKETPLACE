@@ -12,6 +12,8 @@ import ReportsScreen from '../screens/admin/ReportsScreen';
 import ReportDetailScreen from '../screens/admin/ReportDetailScreen';
 import BatchVerificationScreen from '../screens/admin/BatchVerificationScreen';
 import BadgeVerificationScreen from '../screens/admin/BadgeVerificationScreen';
+import SystemHealthScreen from '../screens/admin/SystemHealthScreen';
+import AdminNotificationsScreen from '../screens/admin/AdminNotificationsScreen';
 import {
   AccountScreen,
   AddServiceScreen,
@@ -168,6 +170,8 @@ function AdminStack() {
       <Stack.Screen name="ReportDetail" component={ReportDetailScreen} />
       <Stack.Screen name="BatchVerification" component={BatchVerificationScreen} />
       <Stack.Screen name="BadgeVerification" component={BadgeVerificationScreen} />
+      <Stack.Screen name="SystemHealth" component={SystemHealthScreen} />
+      <Stack.Screen name="AdminNotifications" component={AdminNotificationsScreen} />
     </Stack.Navigator>
   );
 }

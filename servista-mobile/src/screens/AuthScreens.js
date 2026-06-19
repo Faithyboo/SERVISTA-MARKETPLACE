@@ -145,6 +145,8 @@ export function RegisterScreen({ navigation }) {
   const [lastName, setLastName] = useState('');
   const [email, setEmail] = useState('');
   const [phone, setPhone] = useState('');
+  const [cityArea, setCityArea] = useState('');
+  const [exactAddress, setExactAddress] = useState('');
   const [password, setPassword] = useState('');
   const [confirmPassword, setConfirmPassword] = useState('');
   const [verificationCode, setVerificationCode] = useState('');
@@ -155,12 +157,24 @@ export function RegisterScreen({ navigation }) {
   const [loading, setLoading] = useState(false);
 
   const submit = async () => {
+    if (role === 'client' && !cityArea.trim()) {
+      Alert.alert(t('Location required'), t('Please enter your City/Area before creating your client account.'));
+      return;
+    }
     if (password !== confirmPassword) {
       Alert.alert(t('Password mismatch'), t('Please confirm your password correctly.'));
       return;
     }
     setLoading(true);
-    const result = await register({ full_name: `${firstName} ${lastName}`.trim(), email, phone, role, password });
+    const result = await register({
+      full_name: `${firstName} ${lastName}`.trim(),
+      email,
+      phone,
+      city_area: cityArea.trim(),
+      address: exactAddress.trim(),
+      role,
+      password,
+    });
     if (result?.requires_2fa) {
       setChallenge(result);
       setVerificationCode('');
@@ -219,6 +233,12 @@ export function RegisterScreen({ navigation }) {
             </View>
             <Input placeholder="Email Address" autoCapitalize="none" keyboardType="email-address" value={email} onChangeText={setEmail} style={styles.signupInput} />
             <Input placeholder="+237 Phone Number" keyboardType="phone-pad" value={phone} onChangeText={setPhone} style={styles.signupInput} />
+            {role === 'client' ? (
+              <>
+                <Input placeholder="City / Area (required)" value={cityArea} onChangeText={setCityArea} style={styles.signupInput} />
+                <Input placeholder="Exact Address (optional)" value={exactAddress} onChangeText={setExactAddress} style={styles.signupInput} />
+              </>
+            ) : null}
             <Input
               placeholder="Password"
               secureTextEntry={!showPassword}

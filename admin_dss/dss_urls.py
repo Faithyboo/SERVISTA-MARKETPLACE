@@ -4,7 +4,7 @@ from .dss_views import (
     FraudAlertsView, ReportListView, ReportDetailView,
     FileReportView, SubmitReviewView,
     BatchVerificationListView, BatchVerificationDetailView,
-    BatchEligibleProvidersView, BadgeEligibleProvidersView,
+    BatchEligibleProvidersView, BadgeEligibleProvidersView, AIAnalysisHistoryView,
 )
 
 urlpatterns = [
@@ -20,4 +20,5 @@ urlpatterns = [
     path('batches/<str:batch_id>/', BatchVerificationDetailView.as_view(), name='batch-detail'),
     path('file-report/', FileReportView.as_view(), name='file-report'),
     path('reviews/', SubmitReviewView.as_view(), name='submit-review'),
+    path('analysis-history/', AIAnalysisHistoryView.as_view(), name='analysis-history'),
 ]

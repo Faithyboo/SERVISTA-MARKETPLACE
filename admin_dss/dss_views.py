@@ -7,12 +7,12 @@ from rest_framework import status
 from django.contrib.auth import get_user_model
 from django.db.models import Avg
 from django.utils import timezone
-from .models import ProviderScore, ProviderReport, BatchVerification, badge_eligibility_check
+from .models import AIAnalysisRun, ProviderScore, ProviderReport, BatchVerification, badge_eligibility_check
 from services.models import ServiceReview
 from .dss_serializers import (
     ProviderScoreSerializer, ProviderReportSerializer,
     ReviewSerializer, BatchVerificationSerializer,
-    BatchEligibleProviderSerializer,
+    BatchEligibleProviderSerializer, AIAnalysisRunSerializer,
 )
 from .dss_engine import calculate_provider_score, recalculate_all_providers
 
@@ -22,6 +22,43 @@ logger = logging.getLogger(__name__)
 
 def is_admin(user):
     return user.is_authenticated and user.role == 'admin'
+
+
+def build_ai_snapshot():
+    """Return the current decision-support facts used by the admin UI and run history."""
+    scores = ProviderScore.objects.all()
+    from users.models import ProviderProfile
+
+    high_risk = scores.filter(fraud_risk_level='HIGH').count()
+    medium_risk = scores.filter(fraud_risk_level='MEDIUM').count()
+    low_risk = scores.filter(fraud_risk_level='LOW').count()
+    pending_reports = ProviderReport.objects.filter(status='pending').count()
+    total_reviews = ServiceReview.objects.count()
+    avg_platform_rating = ServiceReview.objects.aggregate(avg=Avg('rating'))['avg'] or 0
+    eligible_provider_ids = scores.filter(badge_eligible=True).values_list('provider_id', flat=True)
+    pending_eligible_count = ProviderProfile.objects.filter(
+        user_id__in=eligible_provider_ids,
+        badge_verification_status='not_verified',
+    ).count()
+
+    return {
+        'fraud_overview': {
+            'high_risk': high_risk,
+            'medium_risk': medium_risk,
+            'low_risk': low_risk,
+            'total_scored': scores.count(),
+        },
+        'reports_overview': {
+            'pending': pending_reports,
+            'total': ProviderReport.objects.count(),
+        },
+        'quality_overview': {
+            'total_reviews': total_reviews,
+            'avg_platform_rating': round(float(avg_platform_rating), 2),
+        },
+        'batch_overview': {'eligible_count': pending_eligible_count},
+        'badge_overview': {'eligible_count': pending_eligible_count},
+    }
 
 
 def build_batch_provider_queue():
@@ -136,49 +173,43 @@ class DSSDashboardView(APIView):
     def get(self, request):
         if not is_admin(request.user):
             return Response({'error': 'Admin only'}, status=403)
+        # Keep the governance dashboard aligned with current booking, review,
+        # KYC, and report data, including providers created before DSS signals.
+        recalculate_all_providers()
+        return Response(build_ai_snapshot())
 
-        scores = ProviderScore.objects.all()
-        high_risk = scores.filter(fraud_risk_level='HIGH').count()
-        medium_risk = scores.filter(fraud_risk_level='MEDIUM').count()
-        low_risk = scores.filter(fraud_risk_level='LOW').count()
-        pending_reports = ProviderReport.objects.filter(status='pending').count()
-        total_reviews = ServiceReview.objects.count()
-        avg_platform_rating = ServiceReview.objects.aggregate(
-            avg=Avg('rating')
-        )['avg'] or 0
 
-        from users.models import ProviderProfile
-        eligible_provider_ids = scores.filter(badge_eligible=True).values_list('provider_id', flat=True)
-        pending_eligible_count = ProviderProfile.objects.filter(
-            user_id__in=eligible_provider_ids,
-            badge_verification_status='not_verified',
-        ).count()
+class AIAnalysisHistoryView(APIView):
+    permission_classes = [IsAuthenticated]
 
-        return Response({
-            'fraud_overview': {
-                'high_risk': high_risk,
-                'medium_risk': medium_risk,
-                'low_risk': low_risk,
-                'total_scored': scores.count(),
-            },
-            'reports_overview': {
-                'pending': pending_reports,
-                'total': ProviderReport.objects.count(),
-            },
-            'quality_overview': {
-                'total_reviews': total_reviews,
-                'avg_platform_rating': round(float(avg_platform_rating), 2),
-            },
-            'batch_overview': {
-                'eligible_count': pending_eligible_count,
-            },
-            'badge_overview': {
-                'eligible_count': ProviderProfile.objects.filter(
-                    user_id__in=eligible_provider_ids,
-                    badge_verification_status='not_verified',
-                ).count(),
-            },
-        })
+    def get(self, request):
+        if not is_admin(request.user):
+            return Response({'error': 'Admin only'}, status=403)
+        runs = AIAnalysisRun.objects.select_related('admin')[:50]
+        return Response(AIAnalysisRunSerializer(runs, many=True).data)
+
+    def post(self, request):
+        if not is_admin(request.user):
+            return Response({'error': 'Admin only'}, status=403)
+        action = request.data.get('action', 'integrity_review')
+        if action not in {'integrity_review', 'score_recalculation'}:
+            return Response({'error': 'Invalid analysis action'}, status=400)
+        run = AIAnalysisRun.objects.create(
+            admin=request.user,
+            action=action,
+            snapshot=build_ai_snapshot(),
+        )
+        return Response(AIAnalysisRunSerializer(run).data, status=status.HTTP_201_CREATED)
+
+    def delete(self, request):
+        if not is_admin(request.user):
+            return Response({'error': 'Admin only'}, status=403)
+        run_id = request.query_params.get('id')
+        if run_id:
+            deleted, _ = AIAnalysisRun.objects.filter(id=run_id).delete()
+        else:
+            deleted, _ = AIAnalysisRun.objects.all().delete()
+        return Response({'deleted': deleted})
 
 
 class ProviderScoreListView(APIView):

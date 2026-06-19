@@ -1,5 +1,5 @@
 from django.contrib import admin
-from .models import ProviderScore, ProviderReport, Review, BatchVerification
+from .models import ProviderScore, ProviderReport, Review, BatchVerification, AIAnalysisRun
 
 
 @admin.register(ProviderScore)
@@ -24,3 +24,10 @@ class ReviewAdmin(admin.ModelAdmin):
 @admin.register(BatchVerification)
 class BatchVerificationAdmin(admin.ModelAdmin):
     list_display = ['batch_id', 'admin', 'status', 'total_providers', 'created_at']
+
+
+@admin.register(AIAnalysisRun)
+class AIAnalysisRunAdmin(admin.ModelAdmin):
+    list_display = ['action', 'admin', 'created_at']
+    list_filter = ['action', 'created_at']
+    search_fields = ['admin__full_name', 'admin__email']

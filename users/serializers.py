@@ -11,12 +11,18 @@ class RegisterSerializer(serializers.ModelSerializer):
 
     class Meta:
         model = User
-        fields = ['id', 'full_name', 'email', 'phone', 'role', 'password']
+        fields = ['id', 'full_name', 'email', 'phone', 'city_area', 'address', 'role', 'password']
 
     def validate_role(self, value):
         if value == 'admin':
             raise serializers.ValidationError('Admin accounts cannot be created through registration.')
         return value
+
+    def validate(self, attrs):
+        role = attrs.get('role') or 'client'
+        if role == 'client' and not str(attrs.get('city_area') or '').strip():
+            raise serializers.ValidationError({'city_area': 'City/Area is required for client accounts.'})
+        return attrs
 
     def create(self, validated_data):
         user = User.objects.create_user(**validated_data)
@@ -26,7 +32,7 @@ class RegisterSerializer(serializers.ModelSerializer):
 class UserSerializer(serializers.ModelSerializer):
     class Meta:
         model = User
-        fields = ['id', 'full_name', 'email', 'phone', 'role', 'profile_photo', 'profile_photo_updated_at', 'last_seen', 'created_at']
+        fields = ['id', 'full_name', 'email', 'phone', 'city_area', 'address', 'role', 'profile_photo', 'profile_photo_updated_at', 'last_seen', 'created_at']
         read_only_fields = ['role', 'profile_photo_updated_at', 'last_seen', 'created_at']
 
 
@@ -157,10 +163,23 @@ class ProviderProfileSerializer(serializers.ModelSerializer):
             return 'To qualify, you need ' + ', '.join(missing) + '.'
         return 'You meet the DSS score criteria. Admin must approve your badge eligibility before purchase.'
 
+    def validate(self, attrs):
+        request = self.context.get('request')
+        is_provider_self_save = bool(request and getattr(request.user, 'role', None) == 'provider')
+        is_new_profile = self.instance is None
+        location_was_submitted = 'city_area' in getattr(self, 'initial_data', {})
+
+        if is_provider_self_save and (is_new_profile or location_was_submitted):
+            city_area = attrs.get('city_area', getattr(self.instance, 'city_area', ''))
+            if not str(city_area or '').strip():
+                raise serializers.ValidationError({'city_area': 'City/Area is required for provider profiles.'})
+
+        return attrs
+
     class Meta:
         model = ProviderProfile
         fields = [
-            'id', 'user', 'business_name', 'bio', 'address', 'latitude',
+            'id', 'user', 'business_name', 'bio', 'city_area', 'address', 'latitude',
             'longitude', 'kyc_status', 'id_front', 'id_back', 'selfie',
             'badge_verification_status', 'badge_verified_at', 'badge_fee',
             'badge_average_rating', 'badge_review_count', 'badge_completed_jobs',
