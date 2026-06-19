@@ -32,6 +32,7 @@ class User(AbstractBaseUser, PermissionsMixin):
     phone           = models.CharField(max_length=20, blank=True)
     role            = models.CharField(max_length=20, choices=ROLE_CHOICES, default='client')
     profile_photo   = models.ImageField(upload_to='profiles/', blank=True, null=True)
+    profile_photo_updated_at = models.DateTimeField(blank=True, null=True)
     last_seen       = models.DateTimeField(blank=True, null=True)
     is_active       = models.BooleanField(default=True)
     is_staff        = models.BooleanField(default=False)
@@ -55,6 +56,7 @@ class EmailVerificationCode(models.Model):
     user = models.ForeignKey(User, on_delete=models.CASCADE, related_name='email_verification_codes')
     challenge_id = models.UUIDField(default=uuid.uuid4, unique=True, editable=False)
     code_hash = models.CharField(max_length=128)
+    code_fingerprint = models.CharField(max_length=64, unique=True, db_index=True, null=True, blank=True)
     purpose = models.CharField(max_length=20, choices=PURPOSE_CHOICES)
     is_used = models.BooleanField(default=False)
     expires_at = models.DateTimeField()
@@ -77,6 +79,11 @@ class ProviderProfile(models.Model):
         ('approved', 'Approved'),
         ('rejected', 'Rejected'),
     ]
+    BADGE_STATUS_CHOICES = [
+        ('not_verified', 'Not Verified'),
+        ('eligible', 'Eligible To Buy'),
+        ('verified', 'Verified'),
+    ]
 
     user = models.OneToOneField(User, on_delete=models.CASCADE, related_name='provider_profile')
     business_name = models.CharField(max_length=255)
@@ -88,6 +95,8 @@ class ProviderProfile(models.Model):
     id_front = models.ImageField(upload_to='kyc/', null=True, blank=True)
     id_back = models.ImageField(upload_to='kyc/', null=True, blank=True)
     selfie = models.ImageField(upload_to='kyc/', null=True, blank=True)
+    badge_verification_status = models.CharField(max_length=20, choices=BADGE_STATUS_CHOICES, default='not_verified')
+    badge_verified_at = models.DateTimeField(null=True, blank=True)
     created_at = models.DateTimeField(auto_now_add=True)
 
     def __str__(self):

@@ -48,6 +48,7 @@ INSTALLED_APPS = [
     'bookings',
     'wallet.apps.WalletConfig',
     'messaging',
+    'admin_dss.apps.AdminDssConfig',
 ]
 
 MIDDLEWARE = [

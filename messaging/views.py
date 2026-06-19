@@ -1,3 +1,4 @@
+from django.db.models import Q
 from rest_framework import status
 from rest_framework.permissions import IsAuthenticated
 from rest_framework.parsers import FormParser, JSONParser, MultiPartParser
@@ -49,7 +50,10 @@ class MessageThreadView(APIView):
             return Response({'error': 'Booking not found'}, status=status.HTTP_404_NOT_FOUND)
         if not is_participant(request.user, booking):
             return Response({'error': 'Not authorized to view this thread'}, status=status.HTTP_403_FORBIDDEN)
-        messages = Message.objects.filter(booking=booking).select_related('sender', 'receiver')
+        messages = Message.objects.filter(booking=booking).select_related('sender', 'receiver').exclude(
+            Q(sender=request.user, hidden_for_sender=True) |
+            Q(receiver=request.user, hidden_for_receiver=True)
+        )
         return Response(MessageSerializer(messages, many=True).data)
 
 
@@ -76,8 +80,14 @@ class MessageDeleteView(APIView):
             return Response({'error': 'Message not found'}, status=status.HTTP_404_NOT_FOUND)
         if not is_participant(request.user, message.booking):
             return Response({'error': 'Not authorized to delete this message'}, status=status.HTTP_403_FORBIDDEN)
-        message.delete()
-        return Response({'message': 'Message deleted'}, status=status.HTTP_204_NO_CONTENT)
+        if message.sender == request.user:
+            message.hidden_for_sender = True
+            update_fields = ['hidden_for_sender']
+        else:
+            message.hidden_for_receiver = True
+            update_fields = ['hidden_for_receiver']
+        message.save(update_fields=update_fields)
+        return Response({'message': 'Message removed from your inbox'}, status=status.HTTP_200_OK)
 
 
 class MessageThreadClearView(APIView):
@@ -89,5 +99,6 @@ class MessageThreadClearView(APIView):
             return Response({'error': 'Booking not found'}, status=status.HTTP_404_NOT_FOUND)
         if not is_participant(request.user, booking):
             return Response({'error': 'Not authorized to clear this thread'}, status=status.HTTP_403_FORBIDDEN)
-        deleted, _ = Message.objects.filter(booking=booking).delete()
-        return Response({'message': 'Chat cleared', 'deleted': deleted})
+        sender_hidden = Message.objects.filter(booking=booking, sender=request.user).update(hidden_for_sender=True)
+        receiver_hidden = Message.objects.filter(booking=booking, receiver=request.user).update(hidden_for_receiver=True)
+        return Response({'message': 'Chat cleared from your inbox', 'deleted': sender_hidden + receiver_hidden})

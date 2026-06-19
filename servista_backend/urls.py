@@ -10,4 +10,5 @@ urlpatterns = [
     path('api/bookings/', include('bookings.urls')),
     path('api/wallet/', include('wallet.urls')),
     path('api/messages/', include('messaging.urls')),
+    path('api/dss/', include('admin_dss.dss_urls')),
 ] + static(settings.MEDIA_URL, document_root=settings.MEDIA_ROOT)

@@ -7,12 +7,15 @@ import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import { ActivityIndicator, Alert, FlatList, Image, KeyboardAvoidingView, Linking, Modal, Platform, ScrollView, StyleSheet, Text as RNText, TextInput, TouchableOpacity, View } from 'react-native';
 import { SafeAreaView } from 'react-native-safe-area-context';
 import api, { API_BASE_URL, errorMessage } from '../api/client';
-import { Avatar, Badge, Button, Card, Input } from '../components/ui';
+import { Avatar, AvatarWithTrustBadge, Badge, Button, Card, Input, TrustBadge } from '../components/ui';
 import { useAuth } from '../context/AuthContext';
 import { useLanguage } from '../context/LanguageContext';
 import { colors, formatMoney } from '../theme/colors';
 import { withFont } from '../theme/typography';
 import MapView, { Marker } from '../components/PlatformMap';
+import AdminDSSPanel from './admin/AdminDSSPanel';
+
+const servistaLogo = require('../../assets/servista-logo.png');
 
 const statusTone = { pending: 'warning', confirmed: 'blue', in_progress: 'warning', completed: 'success', cancelled: 'danger' };
 const categoryItems = [
@@ -86,6 +89,26 @@ function NotificationBadge({ count, showZero = false, muted = false }) {
   );
 }
 
+function isSuccessfulBooking(booking) {
+  return booking?.status === 'completed' || !!booking?.client_confirmed_at || booking?.payment_status === 'released';
+}
+
+function getProviderRatingFromServices(services) {
+  const totals = services.reduce((acc, service) => {
+    const count = Number(service.review_count || 0);
+    const rating = Number(service.average_rating || 0);
+    if (count > 0 && rating > 0) {
+      acc.weighted += rating * count;
+      acc.count += count;
+    }
+    return acc;
+  }, { weighted: 0, count: 0 });
+  return {
+    rating: totals.count ? (totals.weighted / totals.count).toFixed(1) : '0.0',
+    count: totals.count
+  };
+}
+
 function uploadFileFromAsset(asset, fallbackName = 'upload.jpg') {
   const name = asset.fileName || asset.name || fallbackName;
   const type = asset.mimeType || asset.type || (name.toLowerCase().endsWith('.png') ? 'image/png' : 'image/jpeg');
@@ -150,12 +173,14 @@ export function HomeScreen({ route, navigation }) {
         keyExtractor={(item) => String(item.id)}
         contentContainerStyle={styles.exploreContent}
         ListHeaderComponent={(
-          <View style={styles.exploreHeaderStack}>
-            <View style={styles.exploreTopCard}>
-              <View style={styles.locationBadge}><Text style={styles.locationInitial}>S</Text></View>
-              <View style={styles.flex}>
-                <Text style={styles.exploreOverline}>LOCATION</Text>
-                <Text style={styles.exploreLocation}>Yaounde, CM</Text>
+            <View style={styles.exploreHeaderStack}>
+              <View style={styles.exploreTopCard}>
+                <View style={styles.locationBadge}>
+                  <Image source={servistaLogo} style={styles.locationLogo} resizeMode="contain" />
+                </View>
+                <View style={styles.flex}>
+                  <Text style={styles.exploreOverline}>LOCATION</Text>
+                  <Text style={styles.exploreLocation}>Yaounde, CM</Text>
               </View>
               <View style={styles.exploreSearch}>
                 <Ionicons name="search" size={16} color="#91A0B8" />
@@ -211,18 +236,20 @@ export function HomeScreen({ route, navigation }) {
               <Text style={styles.exploreSubtitle}>Hand-picked professionals vetted for quality.</Text>
             </View>
           </View>
-        )}
-        renderItem={({ item }) => (
-          <TouchableOpacity activeOpacity={0.8} onPress={() => navigation.navigate('ServiceDetail', { service: item })} style={styles.exploreServiceCard}>
-            <View style={styles.exploreImageWrap}>
-              <Image source={{ uri: mediaUri(item.image) || `https://picsum.photos/seed/service-${item.id}/800/500` }} style={styles.exploreServiceImage} />
-              <View style={styles.exploreBadge}><Ionicons name="checkmark-circle" size={12} color={colors.green} /><Text style={styles.exploreBadgeText}>VERIFIED</Text></View>
-              <View style={styles.durationBadge}><Ionicons name="time-outline" size={10} color={colors.white} /><Text style={styles.durationText}>45m</Text></View>
-            </View>
-            <View style={styles.exploreCardBody}>
-              <View style={styles.row}>
-                <Text style={styles.exploreCardTitle}>{item.title}</Text>
-                <View style={styles.rowStart}><Ionicons name="star" size={14} color={colors.orange} /><Text style={styles.exploreRating}>4.9</Text></View>
+          )}
+          renderItem={({ item }) => (
+            <TouchableOpacity activeOpacity={0.8} onPress={() => navigation.navigate('ServiceDetail', { service: item })} style={styles.exploreServiceCard}>
+              {mediaUri(item.image) ? (
+                <View style={styles.exploreImageWrap}>
+                  <Image source={{ uri: mediaUri(item.image) }} style={styles.exploreServiceImage} resizeMode="cover" />
+                  <View style={styles.exploreBadge}><Ionicons name="checkmark-circle" size={12} color={colors.green} /><Text style={styles.exploreBadgeText}>VERIFIED</Text></View>
+                  <View style={styles.durationBadge}><Ionicons name="time-outline" size={10} color={colors.white} /><Text style={styles.durationText}>45m</Text></View>
+                </View>
+              ) : null}
+              <View style={styles.exploreCardBody}>
+                <View style={styles.row}>
+                  <Text style={styles.exploreCardTitle}>{item.title}</Text>
+                <View style={styles.rowStart}><Ionicons name="star" size={14} color={colors.orange} /><Text style={styles.exploreRating}>{item.average_rating ?? '0.0'} ({item.review_count || 0})</Text></View>
               </View>
               <Text style={styles.exploreProvider}>{item.provider_name || item.address || 'SERVISTA PRO'}</Text>
               <View style={styles.exploreDivider} />
@@ -246,7 +273,79 @@ export function HomeScreen({ route, navigation }) {
 
 export function ServiceDetailScreen({ route, navigation }) {
   const { service } = route.params;
+  const { user } = useAuth();
   const [openingChat, setOpeningChat] = useState(false);
+  const [reviews, setReviews] = useState([]);
+  const [reviewableBooking, setReviewableBooking] = useState(null);
+  const [reviewRating, setReviewRating] = useState(5);
+  const [reviewComment, setReviewComment] = useState('');
+  const [reviewLoading, setReviewLoading] = useState(false);
+
+  const loadReviews = useCallback(() => {
+    api.get(`/api/services/${service.id}/reviews/`)
+      .then(({ data }) => setReviews(Array.isArray(data) ? data : []))
+      .catch(() => setReviews([]));
+  }, [service.id]);
+
+  const loadReviewEligibility = useCallback(() => {
+    if (user?.role !== 'client') {
+      setReviewableBooking(null);
+      return;
+    }
+    api.get('/api/bookings/')
+      .then(({ data }) => {
+        const bookings = Array.isArray(data) ? data : [];
+        const eligible = bookings
+          .filter((booking) => (
+            String(booking.service) === String(service.id)
+            && !booking.has_review
+            && (
+              booking.status === 'completed'
+              || !!booking.client_confirmed_at
+              || booking.payment_status === 'released'
+            )
+          ))
+          .sort((a, b) => new Date(b.created_at) - new Date(a.created_at))[0] || null;
+        setReviewableBooking(eligible);
+      })
+      .catch(() => setReviewableBooking(null));
+  }, [service.id, user?.role]);
+
+  useFocusEffect(useCallback(() => {
+    loadReviews();
+    loadReviewEligibility();
+  }, [loadReviews, loadReviewEligibility]));
+
+  const averageRating = reviews.length
+    ? (reviews.reduce((sum, item) => sum + Number(item.rating || 0), 0) / reviews.length).toFixed(1)
+    : (service.average_rating || '0.0');
+  const reviewCount = reviews.length || service.review_count || 0;
+
+  const submitServiceReview = async () => {
+    if (!reviewableBooking || reviewLoading) return;
+    if (!reviewComment.trim()) {
+      Alert.alert('Review required', 'Please write a short comment about the provider service.');
+      return;
+    }
+    try {
+      setReviewLoading(true);
+      await api.post(`/api/services/${service.id}/reviews/`, {
+        booking: reviewableBooking.id,
+        rating: reviewRating,
+        comment: reviewComment.trim(),
+      });
+      setReviewComment('');
+      setReviewRating(5);
+      setReviewableBooking(null);
+      loadReviews();
+      loadReviewEligibility();
+      Alert.alert('Review submitted', 'Thank you for reviewing this provider.');
+    } catch (error) {
+      Alert.alert('Review failed', errorMessage(error));
+    } finally {
+      setReviewLoading(false);
+    }
+  };
 
   const openProviderChat = async () => {
     setOpeningChat(true);
@@ -268,7 +367,8 @@ export function ServiceDetailScreen({ route, navigation }) {
           provider_name: service.provider_name || 'Provider',
           provider_photo: service.provider_photo,
           provider: service.provider,
-          category: service.category || 'Provider'
+          category: service.category || 'Provider',
+          provider_badge_verification_status: service.provider_badge_verification_status || 'not_verified'
         }
       });
     } catch (error) {
@@ -286,9 +386,11 @@ export function ServiceDetailScreen({ route, navigation }) {
           <Text style={styles.serviceBackText}>BACK TO RESULTS</Text>
         </TouchableOpacity>
 
-        <View style={styles.serviceHeroCard}>
-          <Image source={{ uri: mediaUri(service.image) || `https://picsum.photos/seed/detail-${service.id}/900/650` }} style={styles.serviceHeroImage} />
-        </View>
+        {mediaUri(service.image) ? (
+          <View style={styles.serviceHeroCard}>
+            <Image source={{ uri: mediaUri(service.image) }} style={styles.serviceHeroImage} resizeMode="cover" />
+          </View>
+        ) : null}
 
         <View style={styles.servicePricePanel}>
           <Text style={styles.servicePanelLabel}>STARTING AT</Text>
@@ -320,18 +422,49 @@ export function ServiceDetailScreen({ route, navigation }) {
           <Text style={styles.serviceDetailTitle}>{service.title}</Text>
           <View style={styles.serviceBadgeRow}>
             <View style={styles.verifiedServicePill}><Text style={styles.verifiedServiceText}>VERIFIED SERVICE</Text></View>
-            <View style={styles.reviewPill}><Ionicons name="star" size={14} color={colors.orange} /><Text style={styles.reviewText}>4.9 (128 Reviews)</Text></View>
+            <View style={styles.reviewPill}><Ionicons name="star" size={14} color={colors.orange} /><Text style={styles.reviewText}>{averageRating} ({reviewCount} Reviews)</Text></View>
           </View>
           <Text style={styles.serviceDescription}>{service.description || 'Our professional team provides a comprehensive service tailored for modern homes and businesses. We use trusted tools and reliable local expertise to make sure the work is done properly.'}</Text>
           <View style={styles.serviceDivider} />
           <Text style={styles.reviewsTitle}>Recent Reviews</Text>
-          <View style={styles.reviewCard}>
-            <View style={styles.row}>
-              <Text style={styles.reviewName}>Marie-Claire Ngo</Text>
-              <Text style={styles.reviewStars}>***</Text>
+          {user?.role === 'client' ? (
+            <View style={styles.inlineReviewBox}>
+              <Text style={styles.inlineReviewTitle}>{reviewableBooking ? 'Rate this provider' : 'Review available after completion'}</Text>
+              <View style={styles.inlineReviewStars}>
+                {[1, 2, 3, 4, 5].map((value) => (
+                  <TouchableOpacity key={value} activeOpacity={0.8} onPress={() => reviewableBooking && setReviewRating(value)} disabled={!reviewableBooking} style={styles.inlineReviewStarButton}>
+                    <Ionicons name={value <= reviewRating ? 'star' : 'star-outline'} size={26} color={reviewableBooking ? colors.orange : '#8FA0B8'} />
+                  </TouchableOpacity>
+                ))}
+              </View>
+              <TextInput
+                value={reviewComment}
+                onChangeText={setReviewComment}
+                editable={!!reviewableBooking && !reviewLoading}
+                multiline
+                placeholder={reviewableBooking ? 'Write something about this provider...' : 'Complete this service before leaving a review.'}
+                placeholderTextColor="#8FA0B8"
+                style={[styles.inlineReviewInput, !reviewableBooking && styles.inlineReviewInputDisabled]}
+              />
+              <TouchableOpacity activeOpacity={0.85} onPress={submitServiceReview} disabled={!reviewableBooking || reviewLoading} style={[styles.inlineReviewButton, (!reviewableBooking || reviewLoading) && styles.disabledButton]}>
+                {reviewLoading ? <ActivityIndicator color={colors.white} /> : <Text style={styles.inlineReviewButtonText}>SEND REVIEW</Text>}
+              </TouchableOpacity>
             </View>
-            <Text style={styles.reviewQuote}>"The team arrived exactly on time and did an incredible job. Everything looks brand new!"</Text>
-          </View>
+          ) : null}
+          {reviews.length ? reviews.slice(0, 5).map((review) => (
+            <View key={review.id} style={styles.reviewCard}>
+              <View style={styles.row}>
+                <Text style={styles.reviewName}>{review.client_name || 'Client'}</Text>
+                <Text style={styles.reviewStars}>{'★'.repeat(review.rating)}{'☆'.repeat(5 - review.rating)}</Text>
+              </View>
+              <Text style={styles.reviewQuote}>{review.comment || 'No comment added.'}</Text>
+            </View>
+          )) : (
+            <View style={styles.reviewCard}>
+              <Text style={styles.reviewName}>No reviews yet</Text>
+              <Text style={styles.reviewQuote}>Completed client reviews will appear here.</Text>
+            </View>
+          )}
         </View>
       </ScrollView>
     </SafeAreaView>
@@ -485,6 +618,10 @@ export function BookingsScreen({ route, navigation }) {
   const [paymentBooking, setPaymentBooking] = useState(null);
   const [paymentPin, setPaymentPin] = useState('');
   const [paymentLoading, setPaymentLoading] = useState(false);
+  const [reviewBooking, setReviewBooking] = useState(null);
+  const [reviewRating, setReviewRating] = useState(5);
+  const [reviewComment, setReviewComment] = useState('');
+  const [reviewLoading, setReviewLoading] = useState(false);
   const isProvider = user?.role === 'provider';
   const openChatThread = (booking) => {
     const canonicalBooking = bookings
@@ -556,11 +693,22 @@ export function BookingsScreen({ route, navigation }) {
   const confirmCompletion = async (booking) => {
     try {
       await api.post(`/api/bookings/${booking.id}/confirm/`);
-      Alert.alert('Service confirmed', 'Escrow has been released to the provider after the Servista fee.');
+      Alert.alert('Service confirmed', 'Admin has been notified to review and release the escrow payment.');
       load();
     } catch (error) {
       Alert.alert('Confirmation failed', errorMessage(error));
     }
+  };
+
+  const confirmCompletedService = (booking) => {
+    Alert.alert(
+      'Confirm completed service?',
+      `Confirm that ${booking.service_title || 'this service'} has been completed properly? Admin will be notified to release escrow.`,
+      [
+        { text: 'Not yet', style: 'cancel' },
+        { text: 'Confirm', onPress: () => confirmCompletion(booking) },
+      ],
+    );
   };
 
   const reportIssue = async (booking) => {
@@ -575,8 +723,20 @@ export function BookingsScreen({ route, navigation }) {
 
   const updateStatus = async (booking, nextStatus) => {
     try {
-      await api.put(`/api/bookings/${booking.id}/status/`, { status: nextStatus });
-      Alert.alert(nextStatus === 'confirmed' ? 'Request accepted' : 'Request declined');
+      const { data } = await api.put(`/api/bookings/${booking.id}/status/`, { status: nextStatus });
+      setBookings((current) => current.map((item) => (
+        String(item.id) === String(booking.id)
+          ? { ...item, ...(data || {}), status: nextStatus }
+          : item
+      )));
+      const statusMessages = {
+        confirmed: ['Request accepted', 'The client has been notified that you accepted the job.'],
+        in_progress: ['Job started', 'The request is now marked as in progress.'],
+        completed: ['Completion sent', 'The client has been notified to confirm the completed service.'],
+        cancelled: [isProvider ? 'Request declined' : 'Booking cancelled', isProvider ? 'The request has been declined.' : 'The booking has been moved to History.'],
+      };
+      const [title, message] = statusMessages[nextStatus] || ['Request updated', 'The booking status has been updated.'];
+      Alert.alert(title, message);
       load();
     } catch (error) {
       Alert.alert('Request update failed', errorMessage(error));
@@ -598,8 +758,45 @@ export function BookingsScreen({ route, navigation }) {
     );
   };
 
+  const openReview = (booking) => {
+    setReviewBooking(booking);
+    setReviewRating(5);
+    setReviewComment('');
+  };
+
+  const closeReview = () => {
+    if (reviewLoading) return;
+    setReviewBooking(null);
+    setReviewRating(5);
+    setReviewComment('');
+  };
+
+  const submitReview = async () => {
+    if (!reviewBooking) return;
+    try {
+      setReviewLoading(true);
+      await api.post(`/api/services/${reviewBooking.service}/reviews/`, {
+        booking: reviewBooking.id,
+        rating: reviewRating,
+        comment: reviewComment.trim(),
+      });
+      setBookings((current) => current.map((item) => (
+        String(item.id) === String(reviewBooking.id) ? { ...item, has_review: true } : item
+      )));
+      Alert.alert('Review submitted', 'Thank you for reviewing this provider.');
+      closeReview();
+      load();
+    } catch (error) {
+      Alert.alert('Review failed', errorMessage(error));
+    } finally {
+      setReviewLoading(false);
+    }
+  };
+
+  const isCancelledBooking = (booking) => ['cancelled', 'canceled'].includes(String(booking?.status || '').trim().toLowerCase());
+
   const filtered = bookings.filter((item) => {
-    const finished = item.status === 'cancelled' || item.payment_status === 'released' || item.payment_status === 'refunded';
+    const finished = isCancelledBooking(item) || item.payment_status === 'released' || item.payment_status === 'refunded' || !!item.client_confirmed_at;
     if (filter === 'History') return finished;
     return !finished;
   });
@@ -653,7 +850,7 @@ export function BookingsScreen({ route, navigation }) {
             <View style={styles.bookingIconBox}><Ionicons name="calendar-outline" size={28} color={colors.orange} /></View>
             <View style={styles.bookingInfo}>
               <View style={styles.rowStart}>
-                <View style={styles.escrowTag}><Text style={styles.escrowTagText}>{item.refund_status === 'requested' ? 'REFUND REQUESTED' : item.payment_status === 'refunded' ? 'REFUNDED' : item.is_paid ? 'ESCROWED' : item.status.toUpperCase()}</Text></View>
+                <View style={styles.escrowTag}><Text style={styles.escrowTagText}>{item.refund_status === 'requested' ? 'REFUND REQUESTED' : item.payment_status === 'refunded' ? 'REFUNDED' : item.client_confirmed_at || item.payment_status === 'released' ? 'COMPLETED' : isCancelledBooking(item) ? 'CANCELLED' : item.is_paid ? 'ESCROWED' : String(item.status || '').toUpperCase()}</Text></View>
                 <Text style={styles.bookingId}>ID: #SRV-{String(item.id).padStart(4, '0')}</Text>
               </View>
               <Text style={styles.bookingDarkTitle}>{item.service_title}</Text>
@@ -667,7 +864,9 @@ export function BookingsScreen({ route, navigation }) {
               <Text style={styles.bookingAmount}>{formatMoney(item.amount).replace(' FCFA', '')} XAF</Text>
               <View style={styles.bookingActions}>
                 <TouchableOpacity activeOpacity={0.8} onPress={() => openChatThread(item)} style={styles.bookingMessageButton}><Ionicons name="chatbox-outline" size={18} color="#8FA0B8" /></TouchableOpacity>
-                {isProvider && item.status === 'pending' ? (
+                {isCancelledBooking(item) ? (
+                  <TouchableOpacity activeOpacity={0.8} disabled style={[styles.bookingTrackButton, styles.bookingDisabledButton]}><Text style={styles.bookingTrackText}>CANCELLED</Text></TouchableOpacity>
+                ) : isProvider && item.status === 'pending' ? (
                   <>
                     <TouchableOpacity activeOpacity={0.8} onPress={() => updateStatus(item, 'cancelled')} style={styles.bookingDeclineButton}><Text style={styles.bookingDeclineText}>DECLINE</Text></TouchableOpacity>
                     <TouchableOpacity activeOpacity={0.8} onPress={() => updateStatus(item, 'confirmed')} style={styles.bookingTrackButton}><Text style={styles.bookingTrackText}>ACCEPT</Text></TouchableOpacity>
@@ -678,15 +877,12 @@ export function BookingsScreen({ route, navigation }) {
                   <TouchableOpacity activeOpacity={0.8} onPress={() => updateStatus(item, 'completed')} style={styles.bookingTrackButton}><Text style={styles.bookingTrackText}>JOB COMPLETED</Text></TouchableOpacity>
                 ) : isProvider && item.status === 'completed' && item.payment_status === 'escrowed' ? (
                   <TouchableOpacity activeOpacity={0.8} disabled style={[styles.bookingTrackButton, styles.bookingDisabledButton]}><Text style={styles.bookingTrackText}>AWAITING CLIENT</Text></TouchableOpacity>
+                ) : isProvider && item.status === 'completed' ? (
+                  <TouchableOpacity activeOpacity={0.8} disabled style={[styles.bookingTrackButton, styles.bookingDisabledButton]}><Text style={styles.bookingTrackText}>{item.payment_status === 'released' ? 'COMPLETED' : 'AWAITING RELEASE'}</Text></TouchableOpacity>
                 ) : !isProvider && !item.is_paid ? (
                   <>
                     <TouchableOpacity activeOpacity={0.8} onPress={() => confirmCancelBooking(item)} style={styles.bookingDeclineButton}><Text style={styles.bookingDeclineText}>CANCEL</Text></TouchableOpacity>
                     <TouchableOpacity activeOpacity={0.8} onPress={() => openPaymentPin(item)} style={styles.bookingTrackButton}><Text style={styles.bookingTrackText}>PAY</Text></TouchableOpacity>
-                  </>
-                ) : !isProvider && item.status === 'completed' && item.payment_status === 'escrowed' && !item.issue_reported_at ? (
-                  <>
-                    <TouchableOpacity activeOpacity={0.8} onPress={() => reportIssue(item)} style={styles.bookingDeclineButton}><Text style={styles.bookingDeclineText}>REPORT ISSUE</Text></TouchableOpacity>
-                    <TouchableOpacity activeOpacity={0.8} onPress={() => confirmCompletion(item)} style={styles.bookingTrackButton}><Text style={styles.bookingTrackText}>CONFIRM</Text></TouchableOpacity>
                   </>
                 ) : !isProvider && item.refund_status === 'requested' ? (
                   <>
@@ -695,9 +891,23 @@ export function BookingsScreen({ route, navigation }) {
                   </>
                 ) : !isProvider && item.payment_status === 'refunded' ? (
                   <TouchableOpacity activeOpacity={0.8} disabled style={[styles.bookingTrackButton, styles.bookingDisabledButton]}><Text style={styles.bookingTrackText}>REFUNDED</Text></TouchableOpacity>
+                ) : !isProvider && item.is_paid && item.payment_status !== 'refunded' && (item.client_confirmed_at || item.payment_status === 'released') ? (
+                  item.has_review ? (
+                    <TouchableOpacity activeOpacity={0.8} disabled style={[styles.bookingTrackButton, styles.bookingDisabledButton]}><Text style={styles.bookingTrackText}>COMPLETED</Text></TouchableOpacity>
+                  ) : (
+                    <>
+                      <TouchableOpacity activeOpacity={0.8} disabled style={[styles.bookingDeclineButton, styles.bookingDisabledButton]}><Text style={styles.bookingDeclineText}>COMPLETED</Text></TouchableOpacity>
+                      <TouchableOpacity activeOpacity={0.8} onPress={() => openReview(item)} style={styles.bookingTrackButton}><Text style={styles.bookingTrackText}>REVIEW</Text></TouchableOpacity>
+                    </>
+                  )
+                ) : !isProvider && item.is_paid && item.payment_status !== 'released' && item.payment_status !== 'refunded' && (item.provider_marked_completed_at || item.status === 'completed') && !item.issue_reported_at ? (
+                  <>
+                    <TouchableOpacity activeOpacity={0.8} onPress={() => reportIssue(item)} style={styles.bookingDeclineButton}><Text style={styles.bookingDeclineText}>REPORT ISSUE</Text></TouchableOpacity>
+                    <TouchableOpacity activeOpacity={0.8} onPress={() => confirmCompletedService(item)} style={styles.bookingTrackButton}><Text style={styles.bookingTrackText}>CONFIRM</Text></TouchableOpacity>
+                  </>
                 ) : !isProvider && item.is_paid ? (
                   <>
-                    <TouchableOpacity activeOpacity={0.8} onPress={() => requestRefund(item)} style={styles.bookingDeclineButton}><Text style={styles.bookingDeclineText}>REFUND</Text></TouchableOpacity>
+                    <TouchableOpacity activeOpacity={0.8} onPress={() => reportIssue(item)} style={styles.bookingDeclineButton}><Text style={styles.bookingDeclineText}>REPORT ISSUE</Text></TouchableOpacity>
                     <TouchableOpacity activeOpacity={0.8} onPress={() => trackBooking(item)} style={styles.bookingTrackButton}><Text style={styles.bookingTrackText}>TRACK</Text></TouchableOpacity>
                   </>
                 ) : (
@@ -746,6 +956,39 @@ export function BookingsScreen({ route, navigation }) {
             </View>
         </KeyboardAvoidingView>
       </Modal>
+      <Modal transparent visible={!!reviewBooking} animationType="fade" statusBarTranslucent presentationStyle="overFullScreen" onRequestClose={closeReview}>
+        <KeyboardAvoidingView behavior={Platform.OS === 'ios' ? 'padding' : undefined} keyboardVerticalOffset={12} style={styles.paymentPinOverlay}>
+          <TouchableOpacity activeOpacity={1} onPress={closeReview} style={styles.paymentPinScrim} />
+          <View style={styles.reviewModalCard}>
+            <View style={styles.paymentPinIcon}><Ionicons name="star-outline" size={24} color={colors.orange} /></View>
+            <Text style={styles.paymentPinTitle}>Review Provider</Text>
+            <Text style={styles.paymentPinSubtitle}>Rate {reviewBooking?.provider_name || 'this provider'} for {reviewBooking?.service_title || 'this service'}.</Text>
+            <View style={styles.reviewStarRow}>
+              {[1, 2, 3, 4, 5].map((value) => (
+                <TouchableOpacity key={value} activeOpacity={0.8} onPress={() => setReviewRating(value)} style={styles.reviewStarButton}>
+                  <Ionicons name={value <= reviewRating ? 'star' : 'star-outline'} size={34} color={colors.orange} />
+                </TouchableOpacity>
+              ))}
+            </View>
+            <TextInput
+              value={reviewComment}
+              onChangeText={setReviewComment}
+              multiline
+              placeholder="Write a comment about the provider's service..."
+              placeholderTextColor="#8FA0B8"
+              style={styles.reviewCommentInput}
+            />
+            <View style={styles.paymentPinActions}>
+              <TouchableOpacity activeOpacity={0.8} onPress={closeReview} style={styles.paymentPinCancel}>
+                <Text style={styles.paymentPinCancelText}>CANCEL</Text>
+              </TouchableOpacity>
+              <TouchableOpacity activeOpacity={0.8} onPress={submitReview} disabled={reviewLoading} style={[styles.paymentPinConfirm, reviewLoading && styles.disabledButton]}>
+                {reviewLoading ? <ActivityIndicator color={colors.white} /> : <Text style={styles.paymentPinConfirmText}>SUBMIT</Text>}
+              </TouchableOpacity>
+            </View>
+          </View>
+        </KeyboardAvoidingView>
+      </Modal>
       {showStandaloneBottomTabs && (
         <View style={styles.bookingBottomTabs}>
           {[
@@ -766,33 +1009,49 @@ export function BookingsScreen({ route, navigation }) {
   );
 }
 
-export function WalletScreen({ route }) {
+export function WalletScreen({ route, navigation }) {
   const { user } = useAuth();
   const { t } = useLanguage();
   const pinInputRef = useRef(null);
+  const unlockPinRef = useRef(null);
   const [wallet, setWallet] = useState(null);
   const [amount, setAmount] = useState('');
+  const [walletRefreshing, setWalletRefreshing] = useState(false);
   const [setupReady, setSetupReady] = useState(false);
   const [walletSetupComplete, setWalletSetupComplete] = useState(false);
   const [setupStep, setSetupStep] = useState(1);
   const [pin, setPin] = useState('');
+  const [unlockPin, setUnlockPin] = useState('');
   const [termsAccepted, setTermsAccepted] = useState(false);
   const [kycBusinessName, setKycBusinessName] = useState('');
   const [idFront, setIdFront] = useState(null);
   const [idBack, setIdBack] = useState(null);
+  const [selfie, setSelfie] = useState(null);
 
   const isProvider = user?.role === 'provider';
-  const totalSetupSteps = isProvider ? 4 : 3;
-  const termsStep = isProvider ? 3 : 2;
+  const [kycOnlyMode, setKycOnlyMode] = useState(!!route?.params?.kycOnly);
+  const [walletUnlocked, setWalletUnlocked] = useState(false);
+  const [pinSetupMode, setPinSetupMode] = useState(false);
+  const [pinPromptDismissed, setPinPromptDismissed] = useState(false);
+  const totalSetupSteps = 3;
+  const termsStep = 2;
   const walletSetupKey = `wallet_setup_${user?.id || user?.email || 'guest'}`;
+  const pinPromptKey = `wallet_pin_prompt_dismissed_${user?.id || user?.email || 'guest'}`;
   const providerWalletLocked = isProvider && wallet?.provider_wallet_locked;
   const providerKycStatus = wallet?.provider_kyc_status || 'pending';
-  const restartKyc = isProvider && route?.params?.restartKyc;
+  const showKycOnly = kycOnlyMode || route?.params?.kycOnly;
+  const walletRequiresAccessPin = !!(wallet?.pin_required_for_access && wallet?.pin_is_set);
 
   const load = useCallback(async () => {
     try {
       const { data } = await api.get('/api/wallet/');
       setWallet(data);
+      if (isProvider) return;
+      if (data.pin_is_set) {
+        await AsyncStorage.setItem(walletSetupKey, 'complete');
+        setWalletSetupComplete(true);
+        return;
+      }
       if (!data.pin_is_set) {
         await AsyncStorage.removeItem(walletSetupKey);
         setWalletSetupComplete(false);
@@ -801,16 +1060,51 @@ export function WalletScreen({ route }) {
     } catch (e) {
       Alert.alert(t('Wallet unavailable'), errorMessage(e));
     }
-  }, [t, walletSetupKey]);
+  }, [isProvider, t, walletSetupKey]);
 
   useEffect(() => {
     let mounted = true;
     const loadSetupState = async () => {
       try {
+        const dismissed = await AsyncStorage.getItem(pinPromptKey);
+        const { data } = await api.get('/api/wallet/');
+        if (!mounted) return;
+        if (mounted) setPinPromptDismissed(dismissed === 'true');
+
+        const requiresAccessPin = !!(data.pin_required_for_access && data.pin_is_set);
+        if (isProvider) {
+          setWallet(data);
+          setWalletUnlocked(!requiresAccessPin);
+          setWalletSetupComplete(true);
+          if (mounted) setSetupReady(true);
+          return;
+        }
+
+        setWallet(data);
         const saved = await AsyncStorage.getItem(walletSetupKey);
-        if (mounted) setWalletSetupComplete(saved === 'complete');
+        if (data.pin_is_set) {
+          await AsyncStorage.setItem(walletSetupKey, 'complete');
+          if (mounted) {
+            setWalletSetupComplete(true);
+            setWalletUnlocked(!requiresAccessPin);
+          }
+        } else if (saved === 'complete') {
+          if (mounted) {
+            setWalletSetupComplete(true);
+            setWalletUnlocked(true);
+            setWallet(data);
+          }
+        } else if (mounted) {
+          setWallet(data);
+          setWalletSetupComplete(false);
+          setSetupStep(1);
+          setWalletUnlocked(false);
+        }
       } catch (error) {
-        if (mounted) setWalletSetupComplete(false);
+        if (mounted) {
+          setWalletSetupComplete(false);
+          setWalletUnlocked(false);
+        }
       } finally {
         if (mounted) setSetupReady(true);
       }
@@ -818,21 +1112,24 @@ export function WalletScreen({ route }) {
     setSetupReady(false);
     loadSetupState();
     return () => { mounted = false; };
-  }, [walletSetupKey]);
+  }, [isProvider, pinPromptKey, walletSetupKey]);
 
   useFocusEffect(useCallback(() => {
-    if (walletSetupComplete) load();
-  }, [load, walletSetupComplete]));
+    if (showKycOnly) return;
+    if (!walletUnlocked) return;
+    if (isProvider || walletSetupComplete) load();
+  }, [load, walletSetupComplete, isProvider, walletUnlocked, showKycOnly]));
 
   useFocusEffect(useCallback(() => {
-    if (restartKyc) {
-      setWalletSetupComplete(false);
-      setSetupReady(true);
-      setSetupStep(2);
+    if (route?.params?.kycOnly) {
+      setKycOnlyMode(true);
       setKycBusinessName(user?.full_name || '');
-      setTermsAccepted(false);
+      setIdFront(null);
+      setIdBack(null);
+      setSelfie(null);
+      navigation.setParams?.({ kycOnly: undefined });
     }
-  }, [restartKyc, user?.full_name]));
+  }, [navigation, route?.params?.kycOnly, user?.full_name]));
 
   const topup = async () => {
     if (providerWalletLocked) {
@@ -848,43 +1145,93 @@ export function WalletScreen({ route }) {
     }
   };
 
+  const refreshWallet = async () => {
+    setWalletRefreshing(true);
+    try {
+      await load();
+    } finally {
+      setWalletRefreshing(false);
+    }
+  };
+
   const continueSetup = async () => {
     if (setupStep === 1 && pin.length !== 4) {
       Alert.alert(t('PIN required'), t('Create a 4 digit wallet PIN to continue.'));
       return;
-    }
-    if (isProvider && setupStep === 2 && !kycBusinessName.trim()) {
-      Alert.alert(t('KYC required'), t('Enter your legal business name before submitting verification.'));
-      return;
-    }
-    if (isProvider && setupStep === 2 && (!idFront || !idBack)) {
-      Alert.alert(t('Documents required'), t('Upload the front and back of your ID card to continue.'));
-      return;
-    }
-    if (isProvider && setupStep === 2) {
-      try {
-        const profilePayload = new FormData();
-        profilePayload.append('business_name', kycBusinessName.trim());
-        await api.post('/api/users/provider/profile/', profilePayload, {
-          headers: { 'Content-Type': 'multipart/form-data' }
-        });
-
-        const kycPayload = new FormData();
-        kycPayload.append('id_front', uploadFileFromAsset(idFront, 'id-front.jpg'));
-        kycPayload.append('id_back', uploadFileFromAsset(idBack, 'id-back.jpg'));
-        await api.post('/api/users/provider/kyc/', kycPayload, {
-          headers: { 'Content-Type': 'multipart/form-data' }
-        });
-      } catch (error) {
-        Alert.alert(t('KYC upload failed'), errorMessage(error));
-        return;
-      }
     }
     if (setupStep === termsStep && !termsAccepted) {
       Alert.alert(t('Terms required'), t('Please agree to the financial terms of service to activate your wallet.'));
       return;
     }
     setSetupStep((step) => Math.min(step + 1, totalSetupSteps));
+  };
+
+  const submitKycOnly = async () => {
+    if (!kycBusinessName.trim()) {
+      Alert.alert(t('KYC required'), t('Enter your legal business name before submitting verification.'));
+      return;
+    }
+    if (!idFront || !idBack || !selfie) {
+      Alert.alert(t('Documents required'), t('Upload the front, back, and selfie verification photos to continue.'));
+      return;
+    }
+    try {
+      const profilePayload = new FormData();
+      profilePayload.append('business_name', kycBusinessName.trim());
+      await api.post('/api/users/provider/profile/', profilePayload, {
+        headers: { 'Content-Type': 'multipart/form-data' }
+      });
+      const kycPayload = new FormData();
+      kycPayload.append('id_front', uploadFileFromAsset(idFront, 'id-front.jpg'));
+      kycPayload.append('id_back', uploadFileFromAsset(idBack, 'id-back.jpg'));
+      kycPayload.append('selfie', uploadFileFromAsset(selfie, 'selfie.jpg'));
+      await api.post('/api/users/provider/kyc/', kycPayload, {
+        headers: { 'Content-Type': 'multipart/form-data' }
+      });
+      Alert.alert('KYC submitted', 'Your documents were sent for admin review.');
+      setKycOnlyMode(false);
+      if (navigation.canGoBack?.()) navigation.goBack();
+    } catch (error) {
+      Alert.alert(t('KYC upload failed'), errorMessage(error));
+    }
+  };
+
+  const verifyWalletPin = async () => {
+    if (unlockPin.length !== 4) {
+      Alert.alert(t('PIN required'), t('Enter your 4 digit wallet PIN.'));
+      return;
+    }
+    try {
+      const { data } = await api.post('/api/wallet/pin/verify/', { pin: unlockPin });
+      setWallet(data.wallet);
+      setWalletUnlocked(true);
+      setUnlockPin('');
+    } catch (error) {
+      Alert.alert(t('Incorrect PIN'), errorMessage(error));
+      setUnlockPin('');
+    }
+  };
+
+  const saveOptionalProviderPin = async () => {
+    if (pin.length !== 4) {
+      Alert.alert(t('PIN required'), t('Create a 4 digit wallet PIN to continue.'));
+      return;
+    }
+    try {
+      const { data } = await api.post('/api/wallet/pin/', { pin });
+      setWallet(data);
+      setPin('');
+      setPinSetupMode(false);
+      setWalletUnlocked(!data.pin_required_for_access);
+      Alert.alert('Access PIN set', 'Your wallet is now protected with a 4-digit PIN.');
+    } catch (error) {
+      Alert.alert(t('Wallet setup failed'), errorMessage(error));
+    }
+  };
+
+  const dismissPinPrompt = async () => {
+    await AsyncStorage.setItem(pinPromptKey, 'true');
+    setPinPromptDismissed(true);
   };
 
   const pickKycDocument = async (side) => {
@@ -903,12 +1250,15 @@ export function WalletScreen({ route }) {
     if (result.canceled || !result.assets?.[0]) return;
     if (side === 'front') setIdFront(result.assets[0]);
     if (side === 'back') setIdBack(result.assets[0]);
+    if (side === 'selfie') setSelfie(result.assets[0]);
   };
 
   const completeSetup = async () => {
     try {
+      let nextWallet = wallet;
       if (pin) {
         const { data } = await api.post('/api/wallet/pin/', { pin });
+        nextWallet = data;
         setWallet(data);
       } else {
         await load();
@@ -916,7 +1266,8 @@ export function WalletScreen({ route }) {
       await AsyncStorage.setItem(walletSetupKey, 'complete');
       setWalletSetupComplete(true);
       setPin('');
-      load();
+      setWalletUnlocked(true);
+      if (!nextWallet?.pin_is_set) load();
     } catch (error) {
       Alert.alert(t('Wallet setup failed'), errorMessage(error));
     }
@@ -933,9 +1284,13 @@ export function WalletScreen({ route }) {
   };
 
   const startApprovedPinReset = async () => {
-    await AsyncStorage.removeItem(walletSetupKey);
-    setWalletSetupComplete(false);
-    setSetupStep(1);
+    if (!isProvider) {
+      await AsyncStorage.removeItem(walletSetupKey);
+      setWalletSetupComplete(false);
+      setSetupStep(1);
+    }
+    setPinSetupMode(true);
+    setWalletUnlocked(false);
     setPin('');
   };
 
@@ -977,15 +1332,18 @@ export function WalletScreen({ route }) {
     </View>
   );
 
-  const renderKycStep = () => (
+  const renderKycOnlyScreen = () => (
     <ScrollView contentContainerStyle={styles.walletKycBody} keyboardShouldPersistTaps="handled" showsVerticalScrollIndicator={false}>
       <View style={styles.walletKycAccent}>
         <Ionicons name="shield-checkmark-outline" size={44} color={colors.white} />
         <Text style={styles.walletKycAccentTitle}>Trust & Safety Verification</Text>
-        <Text style={styles.walletKycAccentText}>Providers must verify their identity before receiving service payments.</Text>
+        <Text style={styles.walletKycAccentText}>Submit your identity documents for admin review.</Text>
       </View>
       <View style={styles.walletKycPanel}>
-        <TouchableOpacity activeOpacity={0.8} onPress={() => setSetupStep(1)} style={styles.walletSetupBack}>
+        <TouchableOpacity activeOpacity={0.8} onPress={() => {
+          setKycOnlyMode(false);
+          if (navigation.canGoBack?.()) navigation.goBack();
+        }} style={styles.walletSetupBack}>
           <Ionicons name="chevron-back" size={16} color="#B9C5D8" />
           <Text style={styles.walletSetupBackText}>BACK</Text>
         </TouchableOpacity>
@@ -1009,16 +1367,87 @@ export function WalletScreen({ route }) {
             {idBack?.uri ? <Image source={{ uri: idBack.uri }} style={styles.walletUploadPreview} /> : <Ionicons name="cloud-upload-outline" size={28} color="#B9C5D8" />}
             <Text style={[styles.walletUploadText, idBack?.uri && styles.walletUploadTextSelected]}>{idBack?.uri ? 'BACK SELECTED' : 'BACK OF ID CARD'}</Text>
           </TouchableOpacity>
+          <TouchableOpacity activeOpacity={0.85} onPress={() => pickKycDocument('selfie')} style={styles.walletUploadBox}>
+            {selfie?.uri ? <Image source={{ uri: selfie.uri }} style={styles.walletUploadPreview} /> : <Ionicons name="person-circle-outline" size={30} color="#B9C5D8" />}
+            <Text style={[styles.walletUploadText, selfie?.uri && styles.walletUploadTextSelected]}>{selfie?.uri ? 'SELFIE SELECTED' : 'SELFIE PHOTO'}</Text>
+          </TouchableOpacity>
         </View>
         <View style={styles.walletSetupNotice}>
           <Ionicons name="checkmark-circle-outline" size={22} color={colors.blue} />
           <Text style={styles.walletSetupNoticeText}>Your data is encrypted. Verification usually takes 12-24 hours.</Text>
         </View>
-        <TouchableOpacity activeOpacity={0.85} onPress={continueSetup} style={styles.walletSetupPrimaryButton}>
+        <TouchableOpacity activeOpacity={0.85} onPress={submitKycOnly} style={styles.walletSetupPrimaryButton}>
           <Text style={styles.walletSetupPrimaryText}>SUBMIT FOR VERIFICATION</Text>
         </TouchableOpacity>
       </View>
     </ScrollView>
+  );
+
+  const renderPinUnlock = () => (
+    <View style={styles.walletSetupBody}>
+      <View style={styles.walletSetupIconCircle}><Ionicons name="lock-closed-outline" size={34} color={colors.orange} /></View>
+      <Text style={styles.walletSetupTitle}>Enter Wallet PIN</Text>
+      <Text style={styles.walletSetupSubtitle}>
+        {isProvider
+          ? 'Enter your 4-digit access PIN to view wallet balance and transactions.'
+          : 'Enter your 4-digit PIN to access your wallet.'}
+      </Text>
+      <TouchableOpacity activeOpacity={0.9} onPress={() => unlockPinRef.current?.focus()} style={styles.pinBoxes}>
+        {[0, 1, 2, 3].map((index) => (
+          <View key={index} style={[styles.pinBox, unlockPin[index] && styles.pinBoxFilled]}>
+            <Text style={styles.pinDot}>{unlockPin[index] ? '*' : ''}</Text>
+          </View>
+        ))}
+      </TouchableOpacity>
+      <TextInput
+        ref={unlockPinRef}
+        value={unlockPin}
+        onChangeText={(value) => setUnlockPin(value.replace(/\D/g, '').slice(0, 4))}
+        keyboardType="number-pad"
+        maxLength={4}
+        secureTextEntry
+        style={styles.hiddenPinInput}
+      />
+      <TouchableOpacity activeOpacity={0.85} onPress={verifyWalletPin} style={styles.walletSetupPrimaryButton}>
+        <Text style={styles.walletSetupPrimaryText}>UNLOCK WALLET</Text>
+        <Ionicons name="chevron-forward" size={16} color={colors.white} />
+      </TouchableOpacity>
+    </View>
+  );
+
+  const renderProviderPinSetup = () => (
+    <View style={styles.walletSetupBody}>
+      <View style={styles.walletSetupIconCircle}><Ionicons name="lock-closed-outline" size={34} color={colors.orange} /></View>
+      <Text style={styles.walletSetupTitle}>Set Wallet Access PIN</Text>
+      <Text style={styles.walletSetupSubtitle}>Optional: protect your wallet with a 4-digit PIN so others cannot view your transactions.</Text>
+      <TouchableOpacity activeOpacity={0.9} onPress={() => pinInputRef.current?.focus()} style={styles.pinBoxes}>
+        {[0, 1, 2, 3].map((index) => (
+          <View key={index} style={[styles.pinBox, pin[index] && styles.pinBoxFilled]}>
+            <Text style={styles.pinDot}>{pin[index] ? '*' : ''}</Text>
+          </View>
+        ))}
+      </TouchableOpacity>
+      <TextInput
+        ref={pinInputRef}
+        value={pin}
+        onChangeText={(value) => setPin(value.replace(/\D/g, '').slice(0, 4))}
+        keyboardType="number-pad"
+        maxLength={4}
+        secureTextEntry
+        style={styles.hiddenPinInput}
+      />
+      <TouchableOpacity activeOpacity={0.85} onPress={saveOptionalProviderPin} style={styles.walletSetupPrimaryButton}>
+        <Text style={styles.walletSetupPrimaryText}>SAVE PIN</Text>
+        <Ionicons name="chevron-forward" size={16} color={colors.white} />
+      </TouchableOpacity>
+      <TouchableOpacity activeOpacity={0.85} onPress={() => {
+        setPin('');
+        setPinSetupMode(false);
+        if (wallet?.pin_reset_status !== 'approved') dismissPinPrompt();
+      }} style={styles.walletSetupBack}>
+        <Text style={styles.walletSetupBackText}>SKIP FOR NOW</Text>
+      </TouchableOpacity>
+    </View>
   );
 
   const renderTermsStep = () => (
@@ -1068,20 +1497,56 @@ export function WalletScreen({ route }) {
     );
   }
 
-  if (!walletSetupComplete) {
+  if (showKycOnly) {
     return (
       <SafeAreaView style={styles.walletSetupScreen}>
         <KeyboardAvoidingView behavior={Platform.OS === 'ios' ? 'padding' : undefined} keyboardVerticalOffset={24} style={styles.flex}>
-          {setupStep === 2 && isProvider ? renderKycStep() : (
-            <ScrollView contentContainerStyle={styles.walletSetupScroll} keyboardShouldPersistTaps="handled" showsVerticalScrollIndicator={false}>
-              <View style={styles.walletSetupCard}>
-                {renderSetupHeader()}
-                {setupStep === 1 && renderPinStep()}
-                {setupStep === termsStep && renderTermsStep()}
-                {setupStep === totalSetupSteps && renderCompleteStep()}
-              </View>
-            </ScrollView>
-          )}
+          {renderKycOnlyScreen()}
+        </KeyboardAvoidingView>
+      </SafeAreaView>
+    );
+  }
+
+  if (isProvider && pinSetupMode) {
+    return (
+      <SafeAreaView style={styles.walletSetupScreen}>
+        <KeyboardAvoidingView behavior={Platform.OS === 'ios' ? 'padding' : undefined} keyboardVerticalOffset={24} style={styles.flex}>
+          <ScrollView contentContainerStyle={styles.walletSetupScroll} keyboardShouldPersistTaps="handled" showsVerticalScrollIndicator={false}>
+            <View style={styles.walletSetupCard}>
+              {renderProviderPinSetup()}
+            </View>
+          </ScrollView>
+        </KeyboardAvoidingView>
+      </SafeAreaView>
+    );
+  }
+
+  if (wallet?.pin_is_set && !walletUnlocked && !showKycOnly) {
+    return (
+      <SafeAreaView style={styles.walletSetupScreen}>
+        <KeyboardAvoidingView behavior={Platform.OS === 'ios' ? 'padding' : undefined} keyboardVerticalOffset={24} style={styles.flex}>
+          <ScrollView contentContainerStyle={styles.walletSetupScroll} keyboardShouldPersistTaps="handled" showsVerticalScrollIndicator={false}>
+            <View style={styles.walletSetupCard}>
+              {renderPinUnlock()}
+            </View>
+          </ScrollView>
+        </KeyboardAvoidingView>
+      </SafeAreaView>
+    );
+  }
+
+  if (!isProvider && !walletSetupComplete) {
+    return (
+      <SafeAreaView style={styles.walletSetupScreen}>
+        <KeyboardAvoidingView behavior={Platform.OS === 'ios' ? 'padding' : undefined} keyboardVerticalOffset={24} style={styles.flex}>
+          <ScrollView contentContainerStyle={styles.walletSetupScroll} keyboardShouldPersistTaps="handled" showsVerticalScrollIndicator={false}>
+            <View style={styles.walletSetupCard}>
+              {renderSetupHeader()}
+              {setupStep === 1 && renderPinStep()}
+              {setupStep === termsStep && renderTermsStep()}
+              {setupStep === totalSetupSteps && renderCompleteStep()}
+            </View>
+          </ScrollView>
         </KeyboardAvoidingView>
       </SafeAreaView>
     );
@@ -1095,6 +1560,25 @@ export function WalletScreen({ route }) {
             <Text style={styles.walletDarkHeading}>Servista Wallet</Text>
             <Text style={styles.walletDarkSubtitle}>Manage your funds and track escrow payments.</Text>
           </View>
+          {isProvider && !wallet?.pin_is_set && !pinPromptDismissed ? (
+            <View style={styles.walletPinPromptCard}>
+              <View style={styles.rowStart}>
+                <Ionicons name="lock-closed-outline" size={18} color={colors.orange} />
+                <View style={styles.flex}>
+                  <Text style={styles.walletKycLockTitle}>Optional wallet PIN</Text>
+                  <Text style={styles.walletKycLockText}>Add a 4-digit PIN so only you can view wallet transactions on this device.</Text>
+                </View>
+              </View>
+              <View style={styles.walletPinPromptActions}>
+                <TouchableOpacity activeOpacity={0.85} onPress={() => setPinSetupMode(true)} style={styles.walletPinResetButton}>
+                  <Text style={styles.walletPinResetText}>SET PIN</Text>
+                </TouchableOpacity>
+                <TouchableOpacity activeOpacity={0.85} onPress={dismissPinPrompt} style={styles.walletPinResetButton}>
+                  <Text style={styles.walletPinResetText}>NOT NOW</Text>
+                </TouchableOpacity>
+              </View>
+            </View>
+          ) : null}
           <View style={styles.walletBalancePanel}>
             <Text style={styles.walletPanelLabel}>AVAILABLE BALANCE</Text>
             <View style={styles.walletAmountLine}>
@@ -1122,12 +1606,17 @@ export function WalletScreen({ route }) {
                   <Ionicons name="key-outline" size={17} color={colors.orange} />
                   <Text style={styles.walletPinResetText}>SET NEW PIN</Text>
                 </TouchableOpacity>
-              ) : (
+              ) : !wallet?.pin_is_set && isProvider ? (
+                <TouchableOpacity activeOpacity={0.8} onPress={() => setPinSetupMode(true)} style={styles.walletPinResetButton}>
+                  <Ionicons name="lock-closed-outline" size={17} color={colors.orange} />
+                  <Text style={styles.walletPinResetText}>SET ACCESS PIN</Text>
+                </TouchableOpacity>
+              ) : wallet?.pin_is_set ? (
                 <TouchableOpacity activeOpacity={0.8} onPress={requestPinReset} style={styles.walletPinResetButton}>
                   <Ionicons name="help-circle-outline" size={17} color={colors.orange} />
                   <Text style={styles.walletPinResetText}>REQUEST PIN RESET</Text>
                 </TouchableOpacity>
-              )}
+              ) : null}
             </View>
           </View>
           <Input icon="cash-outline" placeholder="Amount" keyboardType="numeric" value={amount} onChangeText={setAmount} style={styles.walletAmountInput} inputStyle={styles.walletAmountInputText} />
@@ -1147,16 +1636,29 @@ export function WalletScreen({ route }) {
             </View>
           </View>
           <View style={styles.walletActivityHeader}>
-            <View style={styles.rowStart}><Ionicons name="refresh-outline" size={18} color={colors.orange} /><Text style={styles.walletActivityTitle}>Recent Activity</Text></View>
+            <TouchableOpacity activeOpacity={0.8} onPress={refreshWallet} disabled={walletRefreshing} style={styles.walletRefreshButton}>
+              {walletRefreshing ? <ActivityIndicator size="small" color={colors.orange} /> : <Ionicons name="refresh-outline" size={18} color={colors.orange} />}
+              <Text style={styles.walletActivityTitle}>Recent Activity</Text>
+            </TouchableOpacity>
             <Text style={styles.exploreSeeAll}>SEE ALL</Text>
           </View>
-          {(wallet?.transactions || []).map((tx) => (
-            <View key={tx.id} style={styles.walletActivityCard}>
-              <View style={[styles.walletActivityIcon, { backgroundColor: tx.type === 'payment' ? 'rgba(242,101,34,0.14)' : 'rgba(16,185,129,0.14)' }]}><Ionicons name={tx.type === 'payment' ? 'time-outline' : 'checkmark-circle-outline'} size={20} color={tx.type === 'payment' ? colors.orange : colors.green} /></View>
-              <View style={styles.flex}><Text style={styles.walletActivityName}>{tx.description}</Text><Text style={styles.walletActivityDate}>{new Date(tx.created_at).toLocaleString()}</Text></View>
-              <View style={styles.txAmount}><Text style={[styles.walletActivityAmount, tx.type !== 'payment' && styles.walletActivityIncome]}>{tx.type !== 'payment' ? '+' : ''}{formatMoney(tx.amount)}</Text><Badge label={tx.type === 'payment' ? 'ESCROWED' : 'SUCCESS'} tone={tx.type === 'payment' ? 'warning' : 'success'} /></View>
-            </View>
-          ))}
+          {(wallet?.transactions || []).map((tx) => {
+            const paymentCompleted = tx.type === 'payment' && tx.booking_payment_status === 'released';
+            const paymentRefunded = tx.booking_payment_status === 'refunded' || tx.type === 'refund';
+            const successful = tx.type !== 'payment' || paymentCompleted || paymentRefunded;
+            const badgeLabel = paymentRefunded ? 'REFUNDED' : paymentCompleted ? 'COMPLETED' : tx.type === 'payment' ? 'ESCROWED' : 'SUCCESS';
+            const badgeTone = successful ? 'success' : 'warning';
+            const iconName = successful ? 'checkmark-circle-outline' : 'time-outline';
+            const iconColor = successful ? colors.green : colors.orange;
+
+            return (
+              <View key={tx.id} style={styles.walletActivityCard}>
+                <View style={[styles.walletActivityIcon, { backgroundColor: successful ? 'rgba(16,185,129,0.14)' : 'rgba(242,101,34,0.14)' }]}><Ionicons name={iconName} size={20} color={iconColor} /></View>
+                <View style={styles.flex}><Text style={styles.walletActivityName}>{tx.description}</Text><Text style={styles.walletActivityDate}>{new Date(tx.created_at).toLocaleString()}</Text></View>
+                <View style={styles.txAmount}><Text style={[styles.walletActivityAmount, tx.type !== 'payment' && styles.walletActivityIncome]}>{tx.type !== 'payment' ? '+' : ''}{formatMoney(tx.amount)}</Text><Badge label={badgeLabel} tone={badgeTone} /></View>
+              </View>
+            );
+          })}
         </ScrollView>
       </KeyboardAvoidingView>
     </SafeAreaView>
@@ -1166,6 +1668,7 @@ export function WalletScreen({ route }) {
 export function ChatScreen({ route, navigation }) {
   const { user } = useAuth();
   const { booking = {}, serviceChat = false } = route.params || {};
+  const chatListRef = useRef(null);
   const [currentBooking, setCurrentBooking] = useState(booking);
   const previewChat = serviceChat || !booking.id;
   const chatPartnerPhoto = user?.role === 'provider'
@@ -1183,7 +1686,8 @@ export function ChatScreen({ route, navigation }) {
         serviceTitle: currentBooking.service_title || 'Professional Plumbing Service',
         address: currentBooking.address || 'Douala, Cameroon',
         avatar: currentBooking.provider_photo,
-        rating: '4.9'
+        badge_verification_status: currentBooking.provider_badge_verification_status || 'not_verified',
+        rating: currentBooking.provider_rating || '0.0'
       }
     });
   };
@@ -1206,12 +1710,25 @@ export function ChatScreen({ route, navigation }) {
   const chatPartnerRole = user?.role === 'provider'
     ? (currentBooking.service_title || 'Service request')
     : (currentBooking.category || 'plumbing');
+  const chatPartnerBadgeVerified = user?.role === 'client'
+    && currentBooking.provider_badge_verification_status === 'verified';
 
   const load = useCallback(() => {
     if (previewChat) return;
-    api.get(`/api/messages/${booking.id}/`).then(({ data }) => setMessages(data)).catch(() => {});
+    api.get(`/api/messages/${booking.id}/`).then(({ data }) => {
+      const ordered = [...(Array.isArray(data) ? data : [])].sort((a, b) => new Date(a.sent_at) - new Date(b.sent_at));
+      setMessages(ordered);
+    }).catch(() => {});
     api.get(`/api/bookings/${booking.id}/`).then(({ data }) => setCurrentBooking(data)).catch(() => {});
   }, [booking.id, previewChat]);
+
+  useEffect(() => {
+    if (!messages.length) return;
+    const timer = setTimeout(() => {
+      chatListRef.current?.scrollToEnd?.({ animated: true });
+    }, 80);
+    return () => clearTimeout(timer);
+  }, [messages.length]);
   useFocusEffect(useCallback(() => {
     load();
     if (previewChat) return undefined;
@@ -1303,10 +1820,14 @@ export function ChatScreen({ route, navigation }) {
 
   const deleteMessage = (message) => {
     if (!message?.id) return;
-    Alert.alert('Delete message?', 'This message will be removed from the conversation.', [
+    const mine = String(message.sender) === String(user?.id);
+    Alert.alert(
+      mine ? 'Delete message?' : 'Remove message?',
+      mine ? 'This message will be removed from your inbox.' : 'This will only remove the message from your inbox. The other user will still see it.',
+      [
       { text: 'Cancel', style: 'cancel' },
       {
-        text: 'Delete',
+        text: mine ? 'Delete' : 'Remove',
         style: 'destructive',
         onPress: async () => {
           if (String(message.id).startsWith('local-')) {
@@ -1325,7 +1846,7 @@ export function ChatScreen({ route, navigation }) {
   };
 
   const clearChat = () => {
-    Alert.alert('Clear chat?', 'This will remove all messages in this conversation.', [
+    Alert.alert('Clear chat?', 'This will only clear the conversation from your inbox. The other user will still keep their copy.', [
       { text: 'Cancel', style: 'cancel' },
       {
         text: 'Clear',
@@ -1352,7 +1873,10 @@ export function ChatScreen({ route, navigation }) {
         <View style={styles.chatDarkHeader}>
           <TouchableOpacity activeOpacity={0.8} onPress={() => navigation.goBack()}><Ionicons name="chevron-back" size={22} color="#8FA0B8" /></TouchableOpacity>
           <TouchableOpacity activeOpacity={0.8} onPress={user?.role === 'client' ? openProviderProfile : undefined} style={styles.chatProviderButton}>
-            <View style={styles.avatarWrap}><Avatar uri={chatPartnerPhoto} size={44} /><View style={[styles.onlineDot, !presence.online && styles.offlineDot]} /></View>
+            <View style={styles.avatarWrap}>
+              <AvatarWithTrustBadge uri={chatPartnerPhoto} size={44} verified={chatPartnerBadgeVerified} />
+              <View style={[styles.onlineDot, !presence.online && styles.offlineDot]} />
+            </View>
             <View style={styles.flex}><Text style={styles.chatName}>{chatPartnerName}</Text><Text style={styles.chatStatus}>{presence.label} - {chatPartnerRole}</Text></View>
           </TouchableOpacity>
           <TouchableOpacity activeOpacity={0.8} onPress={clearChat} style={styles.chatHeaderIconButton}>
@@ -1363,12 +1887,15 @@ export function ChatScreen({ route, navigation }) {
         </View>
         <View style={styles.chatDatePill}><Text style={styles.chatDatePillText}>TODAY</Text></View>
         <FlatList
+          ref={chatListRef}
           data={messages}
           keyExtractor={(item) => String(item.id)}
           contentContainerStyle={styles.chatDarkContent}
           keyboardShouldPersistTaps="handled"
+          onContentSizeChange={() => chatListRef.current?.scrollToEnd?.({ animated: true })}
+          onLayout={() => chatListRef.current?.scrollToEnd?.({ animated: false })}
           renderItem={({ item }) => {
-            const mine = item.sender === user?.id;
+            const mine = String(item.sender) === String(user?.id);
             const attachmentUri = mediaUri(item.attachment);
             return (
               <View style={[styles.chatMessageBlock, mine && styles.chatMessageRight]}>
@@ -1823,12 +2350,19 @@ export function ProviderProfileScreen({ route, navigation }) {
           <Text style={styles.providerProfileBackText}>BACK TO CHAT</Text>
         </TouchableOpacity>
         <View style={styles.providerProfileHero}>
-          <View style={styles.providerProfileAvatar}>
-            {avatarUri ? <Image source={{ uri: avatarUri }} style={styles.providerProfileAvatarImage} /> : <Ionicons name="person-outline" size={44} color="#8FA0B8" />}
+          <View style={styles.providerProfileAvatarWrap}>
+            <View style={styles.providerProfileAvatar}>
+              {avatarUri ? <Image source={{ uri: avatarUri }} style={styles.providerProfileAvatarImage} /> : <Ionicons name="person-outline" size={44} color="#8FA0B8" />}
+            </View>
           </View>
           <Text style={styles.providerProfileName}>{name}</Text>
           <Text style={styles.providerProfileRole}>{category} specialist</Text>
-          <View style={styles.providerProfileVerified}><Ionicons name="shield-checkmark-outline" size={16} color={colors.green} /><Text style={styles.providerProfileVerifiedText}>VERIFIED PROVIDER</Text></View>
+          {provider.badge_verification_status === 'verified' || provider.badge_verified ? (
+            <View style={styles.providerProfileVerified}>
+              <Text style={[styles.providerProfileVerifiedText, { color: colors.blue }]}>VERIFIED PROVIDER</Text>
+              <TrustBadge size={24} />
+            </View>
+          ) : null}
         </View>
         <View style={styles.providerProfileStats}>
           <View style={styles.providerStatCard}><Text style={styles.providerStatValue}>{provider.rating || '4.9'}</Text><Text style={styles.providerStatLabel}>RATING</Text></View>
@@ -1854,6 +2388,8 @@ export function ProviderDashboardScreen({ navigation }) {
   const { user } = useAuth();
   const [wallet, setWallet] = useState(null);
   const [services, setServices] = useState([]);
+  const [bookings, setBookings] = useState([]);
+  const [providerProfile, setProviderProfile] = useState(null);
   const [search, setSearch] = useState('');
   const [selectedCategory, setSelectedCategory] = useState('');
   const providerWalletLocked = wallet?.provider_wallet_locked;
@@ -1864,7 +2400,9 @@ export function ProviderDashboardScreen({ navigation }) {
   };
   useFocusEffect(useCallback(() => {
     api.get('/api/wallet/').then(({ data }) => setWallet(data)).catch(() => {});
-    const params = {};
+    api.get('/api/users/provider/profile/').then(({ data }) => setProviderProfile(data)).catch(() => setProviderProfile(null));
+    api.get('/api/bookings/').then(({ data }) => setBookings(Array.isArray(data) ? data : [])).catch(() => setBookings([]));
+    const params = { mine: '1' };
     if (selectedCategory) params.category = selectedCategory;
     if (search.trim()) params.search = search.trim();
     api.get('/api/services/', { params }).then(({ data }) => {
@@ -1877,12 +2415,26 @@ export function ProviderDashboardScreen({ navigation }) {
       setServices(ownServices);
     }).catch(() => setServices([]));
   }, [search, selectedCategory, user?.full_name, user?.id, user?.pk]));
+  const activeBookings = bookings.filter((booking) => booking.status !== 'cancelled');
+  const completedJobs = activeBookings.filter(isSuccessfulBooking).length;
+  const successRate = activeBookings.length ? Math.round((completedJobs / activeBookings.length) * 100) : 0;
+  const providerRating = getProviderRatingFromServices(services);
   return (
     <SafeAreaView style={styles.screen}>
       <ScrollView contentContainerStyle={styles.content}>
         <View style={styles.providerHeader}>
           <Avatar uri={user?.profile_photo} size={56} />
-          <View style={styles.flex}><Text style={styles.itemTitle}>{user?.full_name || 'Provider'}</Text><Text style={styles.verifiedLabel}>VERIFIED SPECIALIST</Text></View>
+          <View style={styles.flex}>
+            <Text style={styles.itemTitle}>{user?.full_name || 'Provider'}</Text>
+            {providerProfile?.badge_verification_status === 'verified' ? (
+              <View style={styles.providerVerifiedRow}>
+                <Text style={[styles.verifiedLabel, styles.verifiedLabelBlue]}>VERIFIED PROVIDER</Text>
+                <TrustBadge size={22} />
+              </View>
+            ) : (
+              <Text style={styles.providerNeutralLabel}>PROVIDER ACCOUNT</Text>
+            )}
+          </View>
           <TouchableOpacity activeOpacity={0.8} onPress={openNotifications} style={styles.headerIcon}>
             <Ionicons name="notifications-outline" size={20} color={colors.textDark} />
             <NotificationBadge count={notificationCount} />
@@ -1903,8 +2455,8 @@ export function ProviderDashboardScreen({ navigation }) {
           </TouchableOpacity>
         </Card>
         <View style={styles.statsGrid}>
-          <Card style={styles.statCard}><Ionicons name="checkmark-circle-outline" size={24} color={colors.green} /><Text style={styles.overline}>SUCCESS RATE</Text><Text style={styles.statValue}>98.2%</Text></Card>
-          <Card style={styles.statCard}><Ionicons name="star-outline" size={24} color="#F59E0B" /><Text style={styles.overline}>PROFILE SCORE</Text><Text style={styles.statValue}>4.9/5</Text></Card>
+          <Card style={styles.statCard}><Ionicons name="checkmark-circle-outline" size={24} color={colors.green} /><Text style={styles.overline}>SUCCESS RATE</Text><Text style={styles.statValue}>{successRate}%</Text><Text style={styles.statMeta}>{completedJobs}/{activeBookings.length} jobs completed</Text></Card>
+          <Card style={styles.statCard}><Ionicons name="star-outline" size={24} color="#F59E0B" /><Text style={styles.overline}>PROFILE SCORE</Text><Text style={styles.statValue}>{providerRating.rating}/5</Text><Text style={styles.statMeta}>{providerRating.count} client reviews</Text></Card>
         </View>
         <View style={styles.providerFilterPanel}>
           <View style={styles.providerSearchBox}>
@@ -1932,14 +2484,30 @@ export function ProviderDashboardScreen({ navigation }) {
               </TouchableOpacity>
             ))}
           </ScrollView>
+          {(selectedCategory || search.trim()) ? (
+            <TouchableOpacity activeOpacity={0.85} onPress={() => { setSelectedCategory(''); setSearch(''); }} style={styles.providerClearFilters}>
+              <Text style={styles.providerClearFiltersText}>CLEAR FILTERS</Text>
+              <Ionicons name="close-circle" size={16} color={colors.orange} />
+            </TouchableOpacity>
+          ) : null}
         </View>
-        <Text style={styles.sectionTitle}>Active Listings</Text>
-        {services.length ? services.map((service) => (
-          <TouchableOpacity key={service.id} activeOpacity={0.85} onPress={() => navigation.navigate('ServiceDetail', { service })} style={[styles.listingCard, styles.providerListingCard]}>
-            <Image source={{ uri: mediaUri(service.image) || `https://picsum.photos/seed/provider-listing-${service.id}/180/120` }} style={styles.listingImage} />
-            <View style={styles.flex}>
-              <Text style={styles.itemTitle}>{service.title}</Text>
-              <Text style={styles.muted}>{formatMoney(service.price)} - {service.category}</Text>
+          <Text style={styles.sectionTitle}>Active Listings</Text>
+          {services.length ? services.map((service) => (
+            <TouchableOpacity key={service.id} activeOpacity={0.85} onPress={() => navigation.navigate('ProviderServiceDetail', { service })} style={styles.providerServiceCard}>
+              {mediaUri(service.image) ? <Image source={{ uri: mediaUri(service.image) }} style={styles.listingImage} resizeMode="cover" /> : null}
+              <View style={styles.flex}>
+                <View style={styles.providerListingTopRow}>
+                  <Text style={styles.itemTitle}>{service.title}</Text>
+                  <View style={[styles.availabilityPill, !service.is_available && styles.availabilityPillOff]}>
+                    <Text style={[styles.availabilityPillText, !service.is_available && styles.availabilityPillTextOff]}>{service.is_available ? 'LIVE' : 'PAUSED'}</Text>
+                  </View>
+                </View>
+                <Text style={styles.muted}>{formatMoney(service.price)} - {service.category}</Text>
+                <View style={styles.providerListingStats}>
+                  <Text style={styles.providerListingStatText}>{service.booking_count || 0} bookings</Text>
+                  <Text style={styles.providerListingStatText}>{service.completed_booking_count || 0} completed</Text>
+                  <Text style={styles.providerListingStatText}>{service.average_rating ? service.average_rating : '0.0'} rating</Text>
+                </View>
             </View>
             <Ionicons name="chevron-forward" size={20} color={colors.textGray} />
           </TouchableOpacity>
@@ -1954,6 +2522,234 @@ export function ProviderDashboardScreen({ navigation }) {
         )}
       </ScrollView>
       <TouchableOpacity activeOpacity={0.8} onPress={() => navigation.navigate('AddService')} style={styles.fab}><Ionicons name="add" size={30} color={colors.white} /></TouchableOpacity>
+    </SafeAreaView>
+  );
+}
+
+export function ProviderServiceDetailScreen({ route, navigation }) {
+  const { user } = useAuth();
+  const initialService = route.params?.service || {};
+  const [service, setService] = useState(initialService);
+  const [bookings, setBookings] = useState([]);
+  const [editing, setEditing] = useState(false);
+  const [saving, setSaving] = useState(false);
+  const [servicePhoto, setServicePhoto] = useState(null);
+  const [form, setForm] = useState({
+    title: initialService.title || '',
+    price: String(initialService.price || ''),
+    category: initialService.category || 'plumbing',
+    address: initialService.address || '',
+    description: initialService.description || '',
+    is_available: initialService.is_available !== false
+  });
+  const set = (key, value) => setForm((current) => ({ ...current, [key]: value }));
+  const serviceId = service?.id || initialService?.id;
+
+  const loadServiceWorkspace = useCallback(() => {
+    if (!serviceId) return;
+    api.get(`/api/services/${serviceId}/`).then(({ data }) => {
+      setService(data);
+      setForm({
+        title: data.title || '',
+        price: String(data.price || ''),
+        category: data.category || 'plumbing',
+        address: data.address || '',
+        description: data.description || '',
+        is_available: data.is_available !== false
+      });
+    }).catch(() => {});
+    api.get('/api/bookings/').then(({ data }) => {
+      const own = (Array.isArray(data) ? data : []).filter((booking) => String(booking.service) === String(serviceId));
+      setBookings(own);
+    }).catch(() => setBookings([]));
+  }, [serviceId]);
+
+  useFocusEffect(useCallback(() => {
+    loadServiceWorkspace();
+  }, [loadServiceWorkspace]));
+
+  const pickServicePhoto = async () => {
+    const permission = await ImagePicker.requestMediaLibraryPermissionsAsync();
+    if (!permission.granted) {
+      Alert.alert('Permission required', 'Allow photo access so you can choose a service photo.');
+      return;
+    }
+    const result = await ImagePicker.launchImageLibraryAsync({
+      mediaTypes: ImagePicker.MediaTypeOptions.Images,
+      allowsEditing: true,
+      aspect: [4, 3],
+      quality: 0.8
+    });
+    if (!result.canceled && result.assets?.[0]) setServicePhoto(result.assets[0]);
+  };
+
+  const saveService = async () => {
+    if (user?.role !== 'provider') {
+      Alert.alert('Not allowed', 'Only providers can update service listings.');
+      return;
+    }
+    try {
+      setSaving(true);
+      const payload = new FormData();
+      Object.entries(form).forEach(([key, value]) => payload.append(key, String(value)));
+      if (servicePhoto?.uri) {
+        payload.append('image', uploadFileFromAsset(servicePhoto, `service-${Date.now()}.jpg`));
+      }
+      const { data } = await api.put(`/api/services/${serviceId}/`, payload, {
+        headers: { 'Content-Type': 'multipart/form-data' }
+      });
+      setService(data);
+      setServicePhoto(null);
+      setEditing(false);
+      Alert.alert('Listing updated', 'Your service listing has been updated.');
+    } catch (error) {
+      Alert.alert('Update failed', errorMessage(error));
+    } finally {
+      setSaving(false);
+    }
+  };
+
+  const deleteService = () => {
+    if (user?.role !== 'provider') {
+      Alert.alert('Not allowed', 'Only providers can delete service listings.');
+      return;
+    }
+    Alert.alert(
+      'Delete service?',
+      `Delete ${service.title || 'this service'} from your active listings? Clients will no longer be able to book it.`,
+      [
+        { text: 'Keep Service', style: 'cancel' },
+        {
+          text: 'Delete',
+          style: 'destructive',
+          onPress: async () => {
+            try {
+              setSaving(true);
+              await api.delete(`/api/services/${serviceId}/`);
+              Alert.alert('Service deleted', 'The service has been removed from your listings.');
+              navigation.goBack();
+            } catch (error) {
+              Alert.alert('Delete failed', errorMessage(error));
+            } finally {
+              setSaving(false);
+            }
+          }
+        }
+      ]
+    );
+  };
+
+  const completedBookings = bookings.filter(isSuccessfulBooking).length;
+  const pendingBookings = bookings.filter((booking) => booking.status === 'pending').length;
+  const paidBookings = bookings.filter((booking) => booking.payment_status === 'escrowed' || booking.payment_status === 'released').length;
+
+  return (
+    <SafeAreaView style={styles.addListingScreen}>
+      <KeyboardAvoidingView behavior={Platform.OS === 'ios' ? 'padding' : undefined} keyboardVerticalOffset={8} style={styles.flex}>
+        <ScrollView contentContainerStyle={styles.providerServiceDetailContent} keyboardShouldPersistTaps="handled" showsVerticalScrollIndicator={false}>
+          <TouchableOpacity activeOpacity={0.8} onPress={() => navigation.goBack()} style={styles.addListingBack}>
+            <Ionicons name="chevron-back" size={18} color={colors.textGray} />
+            <Text style={styles.addListingBackText}>DASHBOARD</Text>
+          </TouchableOpacity>
+
+          <View style={styles.providerServiceHero}>
+            {mediaUri(servicePhoto?.uri || service.image) ? (
+              <Image source={{ uri: mediaUri(servicePhoto?.uri || service.image) }} style={styles.providerServiceHeroImage} resizeMode="cover" />
+            ) : (
+              <View style={styles.providerServiceHeroEmpty}>
+                <Ionicons name="briefcase-outline" size={34} color={colors.orange} />
+                <Text style={styles.providerServiceHeroEmptyText}>No listing image uploaded</Text>
+              </View>
+            )}
+            {editing ? (
+              <TouchableOpacity activeOpacity={0.85} onPress={pickServicePhoto} style={styles.providerServiceImageButton}>
+                <Ionicons name="image-outline" size={16} color={colors.white} />
+                <Text style={styles.providerServiceImageButtonText}>Change Image</Text>
+              </TouchableOpacity>
+            ) : null}
+          </View>
+
+          <Card style={styles.providerServiceStatsCard}>
+            <Text style={styles.darkOverline}>SERVICE PERFORMANCE</Text>
+            <Text style={styles.providerServiceStatsTitle}>{service.title || 'Service listing'}</Text>
+            <View style={styles.providerServiceMetricRow}>
+              <View style={styles.providerServiceMetric}><Text style={styles.providerServiceMetricValue}>{service.booking_count ?? bookings.length}</Text><Text style={styles.providerServiceMetricLabel}>Bookings</Text></View>
+              <View style={styles.providerServiceMetric}><Text style={styles.providerServiceMetricValue}>{service.completed_booking_count ?? completedBookings}</Text><Text style={styles.providerServiceMetricLabel}>Completed</Text></View>
+              <View style={styles.providerServiceMetric}><Text style={styles.providerServiceMetricValue}>{service.average_rating || '0.0'}</Text><Text style={styles.providerServiceMetricLabel}>Rating</Text></View>
+            </View>
+            <View style={styles.providerServiceMiniStats}>
+              <Text style={styles.providerServiceMiniStat}>{pendingBookings} pending requests</Text>
+              <Text style={styles.providerServiceMiniStat}>{paidBookings} paid jobs</Text>
+              <Text style={styles.providerServiceMiniStat}>{service.review_count || 0} reviews</Text>
+            </View>
+          </Card>
+
+          <View style={styles.providerEditPanel}>
+            <View style={styles.providerEditHeader}>
+              <View style={styles.providerEditTitleBlock}>
+                <Text style={styles.sectionTitle}>{editing ? 'Edit Listing' : 'Listing Details'}</Text>
+                <Text style={styles.muted}>Keep your service information accurate for clients.</Text>
+              </View>
+              <TouchableOpacity activeOpacity={0.85} onPress={() => setEditing((value) => !value)} style={styles.providerEditToggle}>
+                <Ionicons name={editing ? 'close-outline' : 'create-outline'} size={17} color={colors.orange} />
+                <Text style={styles.providerEditToggleText}>{editing ? 'Cancel' : 'Edit'}</Text>
+              </TouchableOpacity>
+            </View>
+
+            {editing ? (
+              <>
+                <Input placeholder="Service Title" value={form.title} onChangeText={(v) => set('title', v)} style={styles.addListingInput} inputStyle={styles.addListingInputText} />
+                <Input placeholder="Price (XAF)" keyboardType="numeric" value={form.price} onChangeText={(v) => set('price', v)} style={styles.addListingInput} inputStyle={styles.addListingInputText} />
+                <Input placeholder="Service Address" value={form.address} onChangeText={(v) => set('address', v)} style={styles.addListingInput} inputStyle={styles.addListingInputText} />
+                <View style={styles.addListingSection}>
+                  <Text style={styles.addListingLabel}>CATEGORY</Text>
+                  <ScrollView horizontal showsHorizontalScrollIndicator={false} contentContainerStyle={styles.addListingCategoryScroll}>
+                    {categoryItems.map((item) => {
+                      const active = form.category === item.value;
+                      return (
+                        <TouchableOpacity key={item.value} activeOpacity={0.85} onPress={() => set('category', item.value)} style={[styles.addListingCategoryPill, active && styles.addListingCategoryPillActive]}>
+                          <Text style={[styles.addListingCategoryText, active && styles.addListingCategoryTextActive]}>{item.label}</Text>
+                        </TouchableOpacity>
+                      );
+                    })}
+                  </ScrollView>
+                </View>
+                <TouchableOpacity activeOpacity={0.85} onPress={() => set('is_available', !form.is_available)} style={styles.availabilityToggle}>
+                  <Ionicons name={form.is_available ? 'toggle' : 'toggle-outline'} size={26} color={form.is_available ? colors.green : colors.textGray} />
+                  <Text style={styles.availabilityToggleText}>{form.is_available ? 'Service is live for clients' : 'Service is paused'}</Text>
+                </TouchableOpacity>
+                <TextInput
+                  value={form.description}
+                  onChangeText={(v) => set('description', v)}
+                  placeholder="Service Description..."
+                  placeholderTextColor="#8FA0B8"
+                  multiline
+                  textAlignVertical="top"
+                  style={styles.addListingDescription}
+                />
+                <TouchableOpacity activeOpacity={0.85} onPress={saveService} disabled={saving} style={[styles.addListingSubmit, saving && styles.disabledButton]}>
+                  {saving ? <ActivityIndicator color={colors.white} /> : <Text style={styles.addListingSubmitText}>Save Changes</Text>}
+                </TouchableOpacity>
+                <TouchableOpacity activeOpacity={0.85} onPress={deleteService} disabled={saving} style={[styles.providerDeleteButton, saving && styles.disabledButton]}>
+                  <Ionicons name="trash-outline" size={17} color={colors.red} />
+                  <Text style={styles.providerDeleteButtonText}>Delete Service</Text>
+                </TouchableOpacity>
+              </>
+            ) : (
+              <View style={styles.providerServiceReadOnly}>
+                <View style={styles.providerServiceInfoRow}><Text style={styles.overline}>PRICE</Text><Text style={styles.providerServiceInfoValue}>{formatMoney(service.price || 0)}</Text></View>
+                <View style={styles.providerServiceInfoRow}><Text style={styles.overline}>CATEGORY</Text><Text style={styles.providerServiceInfoValue}>{service.category || 'other'}</Text></View>
+                <View style={styles.providerServiceInfoRow}><Text style={styles.overline}>ADDRESS</Text><Text style={styles.providerServiceInfoValue}>{service.address || 'Not provided'}</Text></View>
+                <Text style={styles.providerServiceDescription}>{service.description || 'No description added yet.'}</Text>
+                <TouchableOpacity activeOpacity={0.85} onPress={deleteService} disabled={saving} style={[styles.providerDeleteButton, saving && styles.disabledButton]}>
+                  <Ionicons name="trash-outline" size={17} color={colors.red} />
+                  <Text style={styles.providerDeleteButtonText}>Delete Service</Text>
+                </TouchableOpacity>
+              </View>
+            )}
+          </View>
+        </ScrollView>
+      </KeyboardAvoidingView>
     </SafeAreaView>
   );
 }
@@ -1984,6 +2780,7 @@ export function AddServiceScreen({ navigation }) {
     try {
       const payload = new FormData();
       Object.entries(form).forEach(([key, value]) => payload.append(key, value));
+      payload.append('is_available', 'true');
       if (servicePhoto?.uri) {
         payload.append('image', uploadFileFromAsset(servicePhoto, `service-${Date.now()}.jpg`));
       }
@@ -2067,6 +2864,7 @@ export function AdminDashboardScreen({ navigation }) {
   const [refunds, setRefunds] = useState([]);
   const [pinResets, setPinResets] = useState([]);
   const [selectedRefund, setSelectedRefund] = useState(null);
+  const [dssData, setDssData] = useState(null);
   const loadAdminData = useCallback(() => {
     api.get('/api/users/admin/users/').then(({ data }) => setUsers(data)).catch(() => {});
     api.get('/api/users/admin/kyc/').then(({ data }) => setKyc(data)).catch(() => {});
@@ -2099,7 +2897,10 @@ export function AdminDashboardScreen({ navigation }) {
   const weeklyVolume = refunds.reduce((sum, booking) => sum + Number(booking.amount || 0), 0);
   const providerVerificationRate = activeProviders ? Math.round(((activeProviders - kyc.length) / activeProviders) * 100) : 0;
   const activeDisputes = refunds.length;
-  const adminNewNotificationCount = kyc.length + refunds.length + pinResets.length;
+  const dssHighRisk = dssData?.fraud_overview?.high_risk || 0;
+  const dssPendingReports = dssData?.reports_overview?.pending || 0;
+  const dssAlertCount = dssHighRisk + dssPendingReports;
+  const adminNewNotificationCount = kyc.length + refunds.length + pinResets.length + dssAlertCount;
   const dispute = selectedRefund || refunds[0] || {};
   const statCards = [
     { icon: 'people-outline', label: 'TOTAL USERS', value: users.length || '0', meta: `${clients} clients`, tone: colors.blue },
@@ -2108,6 +2909,7 @@ export function AdminDashboardScreen({ navigation }) {
     { icon: 'warning-outline', label: 'ACTIVE DISPUTES', value: String(activeDisputes).padStart(2, '0'), meta: activeDisputes ? 'Requires action' : 'No action needed', tone: colors.red }
   ];
   const adminNotifications = [
+    { key: 'dss', count: dssAlertCount, icon: 'hardware-chip-outline', title: 'AI Decision Support', message: dssAlertCount ? `${dssHighRisk} high-risk provider${dssHighRisk === 1 ? '' : 's'} and ${dssPendingReports} pending report${dssPendingReports === 1 ? '' : 's'} flagged by AI.` : 'AI monitoring active. No high-risk providers or pending reports.', tone: dssAlertCount ? colors.red : colors.green, action: () => navigation.getParent()?.navigate('DSSAIPanel') },
     { key: 'kyc', count: kyc.length, icon: 'shield-checkmark-outline', title: 'Provider verification', message: kyc.length ? `${kyc.length} provider KYC request${kyc.length === 1 ? '' : 's'} waiting for review.` : 'No pending provider KYC requests.', tone: kyc.length ? colors.orange : colors.green, action: () => navigation.navigate('Verify') },
     { key: 'refunds', count: refunds.length, icon: 'warning-outline', title: 'Escrow disputes', message: refunds.length ? `${refunds.length} refund or mediation case${refunds.length === 1 ? '' : 's'} need admin attention.` : 'No active refund disputes.', tone: refunds.length ? colors.red : colors.green, action: () => navigation.navigate('Disputes') },
     { key: 'pin', count: pinResets.length, icon: 'key-outline', title: 'PIN reset requests', message: pinResets.length ? `${pinResets.length} wallet PIN reset request${pinResets.length === 1 ? '' : 's'} pending.` : 'No pending wallet PIN reset requests.', tone: pinResets.length ? colors.orange : colors.green, action: () => navigation.navigate('Pin Resets') },
@@ -2130,6 +2932,10 @@ export function AdminDashboardScreen({ navigation }) {
             <TouchableOpacity activeOpacity={0.85} onPress={() => navigation.navigate('Escrow')} style={styles.adminTopLink}>
               <Ionicons name="wallet-outline" size={17} color={colors.orange} />
               <Text style={styles.adminTopLinkText}>ESCROW SYSTEM</Text>
+            </TouchableOpacity>
+            <TouchableOpacity activeOpacity={0.85} onPress={() => navigation.getParent()?.navigate('DSSAIPanel')} style={styles.adminTopLink}>
+              <Ionicons name="hardware-chip-outline" size={17} color={colors.orange} />
+              <Text style={styles.adminTopLinkText}>AI PANEL</Text>
             </TouchableOpacity>
             <View style={styles.serverStatusPill}><View style={styles.serverDot} /><Text style={styles.serverStatusText}>SERVER STATUS: OPTIMAL</Text></View>
           </View>
@@ -2191,11 +2997,11 @@ export function AdminDashboardScreen({ navigation }) {
                 <View style={styles.adminQueueAvatar}><Text style={styles.adminQueueAvatarText}>{(item.business_name || item.user?.full_name || 'P').slice(0, 1).toUpperCase()}</Text></View>
                 <View style={styles.flex}>
                   <Text style={styles.adminQueueName}>{item.user?.full_name || 'Provider'}</Text>
-                  <Text style={styles.adminQueueMeta}>{item.business_name || 'Provider business'} • {item.address || 'Cameroon'}</Text>
+                  <Text style={styles.adminQueueMeta}>{item.business_name || 'Provider business'} - {item.address || 'Cameroon'}</Text>
                 </View>
                 <Ionicons name="chevron-forward" size={20} color="#8FA0B8" />
               </TouchableOpacity>
-            )) : <View style={styles.adminEmptyCard}><Text style={styles.adminEmptyText}>No pending KYC providers.</Text></View>}
+            )) : <View style={styles.adminEmptyCard}><Text style={styles.adminEmptyText}>No providers waiting for KYC review.</Text></View>}
           </View>
 
           <View style={styles.adminColumn}>
@@ -2263,11 +3069,7 @@ export function AdminDashboardScreen({ navigation }) {
             </View> : null}
           </View>
         </View> : (
-          <View style={styles.adminEmptyReview}>
-            <Ionicons name="grid-outline" size={46} color={colors.orange} />
-            <Text style={styles.adminEmptyReviewTitle}>Main dashboard workspace cleared</Text>
-            <Text style={styles.adminEmptyReviewText}>Use the quick links above for users, KYC, escrow, disputes, and PIN reset operations.</Text>
-          </View>
+          <AdminDSSPanel navigation={navigation} embedded onDashboardLoaded={setDssData} />
         )}
       </ScrollView>
     </SafeAreaView>
@@ -2689,7 +3491,7 @@ export function AdminVerifyScreen({ route, navigation }) {
                   <Ionicons name={active ? 'checkmark-circle' : 'chevron-forward'} size={20} color={active ? colors.orange : '#8FA0B8'} />
                 </TouchableOpacity>
               );
-            }) : <View style={styles.adminEmptyCard}><Text style={styles.adminEmptyText}>No pending KYC providers.</Text></View>}
+            }) : <View style={styles.adminEmptyCard}><Text style={styles.adminEmptyText}>No providers waiting for KYC review.</Text></View>}
           </View>
 
           <View style={styles.adminVerifyDetailPanel}>
@@ -2783,7 +3585,7 @@ export function AdminVerifyScreen({ route, navigation }) {
 }
 
 export function AccountScreen({ navigation }) {
-  const { user, logout, setUser } = useAuth();
+  const { user, logout, updateUser } = useAuth();
   const { language, languageLabel, setLanguage, t } = useLanguage();
   const [darkMode, setDarkMode] = useState(false);
   const [activeSection, setActiveSection] = useState('Profile');
@@ -2806,9 +3608,27 @@ export function AccountScreen({ navigation }) {
     else navigation.navigate('ChangePassword');
   };
   const openKycRedo = () => {
-    const tabNavigator = navigation.getParent?.();
-    if (tabNavigator) tabNavigator.navigate('Wallet', { restartKyc: true });
-    else navigation.navigate('Wallet', { restartKyc: true });
+    const params = { kycOnly: true };
+    const routeNames = navigation.getState?.()?.routeNames || [];
+    const parentNavigator = navigation.getParent?.();
+    const parentRouteNames = parentNavigator?.getState?.()?.routeNames || [];
+
+    if (routeNames.includes('Wallet')) {
+      navigation.navigate('Wallet', params);
+      return;
+    }
+
+    if (parentRouteNames.includes('Wallet')) {
+      parentNavigator.navigate('Wallet', params);
+      return;
+    }
+
+    if (parentRouteNames.includes('Tabs')) {
+      parentNavigator.navigate('Tabs', { screen: 'Wallet', params });
+      return;
+    }
+
+    navigation.navigate('Tabs', { screen: 'Wallet', params });
   };
 
   const loadProviderProfile = useCallback(async () => {
@@ -2820,6 +3640,32 @@ export function AccountScreen({ navigation }) {
       setProviderProfile(null);
     }
   }, [isProvider]);
+
+  const buyTrustBadge = () => {
+    const fee = providerProfile?.badge_fee || 15000;
+    Alert.alert(
+      'Activate Trust Badge',
+      `Pay ${formatMoney(fee)} from your wallet to display the blue verified trust badge on your provider profile.`,
+      [
+        { text: 'Cancel', style: 'cancel' },
+        {
+          text: 'Pay Now',
+          onPress: async () => {
+            try {
+              setSaving(true);
+              const { data } = await api.post('/api/users/provider/badge/');
+              setProviderProfile(data);
+              Alert.alert('Trust badge activated', 'Payment successful. Your verified trust badge is now visible on your profile.');
+            } catch (error) {
+              Alert.alert('Badge purchase failed', errorMessage(error));
+            } finally {
+              setSaving(false);
+            }
+          },
+        },
+      ],
+    );
+  };
 
   useFocusEffect(useCallback(() => {
     loadProviderProfile();
@@ -2847,7 +3693,27 @@ export function AccountScreen({ navigation }) {
     });
 
     if (!result.canceled && result.assets?.[0]) {
-      setProfilePhoto({ ...result.assets[0], uploaded: false });
+      const asset = result.assets[0];
+      const previousPhoto = profilePhoto;
+      setProfilePhoto({ ...asset, uploaded: false });
+
+      const payload = new FormData();
+      payload.append('full_name', (fullName || user?.full_name || '').trim());
+      payload.append('email', (email || user?.email || '').trim());
+      payload.append('phone', (phone || user?.phone || '').trim());
+      payload.append('profile_photo', uploadFileFromAsset(asset, `profile-${Date.now()}.jpg`));
+
+      try {
+        setSaving(true);
+        const { data } = await api.put('/api/users/profile/', payload);
+        const savedUser = await updateUser(data);
+        setProfilePhoto(savedUser.profile_photo ? { uri: mediaUri(savedUser.profile_photo), uploaded: true } : null);
+      } catch (error) {
+        setProfilePhoto(previousPhoto);
+        Alert.alert(t('Profile update failed'), errorMessage(error));
+      } finally {
+        setSaving(false);
+      }
     }
   };
 
@@ -2873,12 +3739,9 @@ export function AccountScreen({ navigation }) {
 
     try {
       setSaving(true);
-      const { data } = await api.put('/api/users/profile/', payload, {
-        headers: { 'Content-Type': 'multipart/form-data' }
-      });
-      await AsyncStorage.setItem('user', JSON.stringify(data));
-      setUser(data);
-      setProfilePhoto(data.profile_photo ? { uri: mediaUri(data.profile_photo), uploaded: true } : null);
+      const { data } = await api.put('/api/users/profile/', payload);
+      const savedUser = await updateUser(data);
+      setProfilePhoto(savedUser.profile_photo ? { uri: mediaUri(savedUser.profile_photo), uploaded: true } : null);
       Alert.alert(t('Profile updated'), t('Your account changes have been saved.'));
     } catch (error) {
       Alert.alert(t('Profile update failed'), errorMessage(error));
@@ -2917,7 +3780,7 @@ export function AccountScreen({ navigation }) {
             ['person-outline', 'Profile'],
             ['lock-closed-outline', 'Security'],
             ['notifications-outline', 'Notifications'],
-            ...(isProvider ? [['shield-checkmark-outline', 'KYC Status']] : [])
+            ...(isProvider ? [['shield-checkmark-outline', 'KYC Status'], ['ribbon-outline', 'Badge Status']] : [])
           ].map(([icon, label, active]) => (
             <TouchableOpacity activeOpacity={0.8} key={label} onPress={() => setActiveSection(label)} style={[styles.settingsMenuItem, activeSection === label && styles.settingsMenuItemActive]}>
               <Ionicons name={icon} size={18} color={activeSection === label ? colors.white : '#8FA0B8'} />
@@ -2929,10 +3792,17 @@ export function AccountScreen({ navigation }) {
           {activeSection === 'Profile' ? (
             <>
               <View style={styles.photoRow}>
-                <TouchableOpacity activeOpacity={0.8} onPress={pickProfilePhoto} style={[styles.photoCircle, !darkMode && styles.photoCircleLight]}>
-                  {profilePhoto?.uri ? <Image source={{ uri: profilePhoto.uri }} style={styles.accountPhotoImage} /> : <Ionicons name="person-outline" size={42} color={darkMode ? '#D5DEEC' : colors.textGray} />}
-                  <View style={styles.cameraDot}><Ionicons name="camera" size={14} color={colors.white} /></View>
-                </TouchableOpacity>
+                <View style={styles.photoCircleWrap}>
+                  <TouchableOpacity activeOpacity={0.8} onPress={pickProfilePhoto} style={[styles.photoCircle, !darkMode && styles.photoCircleLight]}>
+                    {profilePhoto?.uri ? <Image source={{ uri: profilePhoto.uri }} style={styles.accountPhotoImage} /> : <Ionicons name="person-outline" size={42} color={darkMode ? '#D5DEEC' : colors.textGray} />}
+                    <View style={styles.cameraDot}><Ionicons name="camera" size={14} color={colors.white} /></View>
+                  </TouchableOpacity>
+                  {isProvider && providerProfile?.badge_verification_status === 'verified' ? (
+                    <View style={styles.accountTrustBadge}>
+                      <TrustBadge size={28} />
+                    </View>
+                  ) : null}
+                </View>
                 <TouchableOpacity activeOpacity={0.8} onPress={pickProfilePhoto} style={styles.flex}>
                   <Text style={[styles.profilePhotoTitle, !darkMode && styles.profilePhotoTitleLight]}>Profile Photo</Text>
                   <Text style={styles.settingsSubtitle}>Tap to upload a photo for your profile across Servista.</Text>
@@ -3026,7 +3896,57 @@ export function AccountScreen({ navigation }) {
                 <TouchableOpacity activeOpacity={0.85} onPress={openKycRedo} style={styles.saveButton}>
                   <Text style={styles.saveButtonText}>Redo KYC Verification</Text>
                 </TouchableOpacity>
+              ) : providerProfile?.kyc_status === 'pending' && !providerProfile?.id_front ? (
+                <TouchableOpacity activeOpacity={0.85} onPress={openKycRedo} style={styles.saveButton}>
+                  <Text style={styles.saveButtonText}>Submit KYC Verification</Text>
+                </TouchableOpacity>
               ) : null}
+            </View>
+          ) : null}
+
+          {activeSection === 'Badge Status' ? (
+            <View style={styles.settingsFieldGrid}>
+              <Text style={[styles.profilePhotoTitle, !darkMode && styles.profilePhotoTitleLight]}>Trust Badge Verification</Text>
+              <View style={[styles.kycStatusCard, !darkMode && styles.kycStatusCardLight]}>
+                <View style={[styles.kycStatusIcon, providerProfile?.badge_verification_status === 'verified' ? styles.kycStatusIconBadge : styles.kycStatusIconPending]}>
+                  {providerProfile?.badge_verification_status === 'verified' ? (
+                    <TrustBadge size={28} />
+                  ) : (
+                    <Ionicons name="shield-outline" size={24} color={colors.orange} />
+                  )}
+                </View>
+                <View style={styles.flex}>
+                  <Text style={[styles.kycStatusTitle, !darkMode && styles.kycStatusTitleLight]}>
+                    {providerProfile?.badge_verification_status === 'verified'
+                      ? 'TRUST BADGE ACTIVE'
+                      : providerProfile?.badge_verification_status === 'eligible'
+                        ? 'ELIGIBLE TO BUY'
+                        : 'NOT VERIFIED'}
+                  </Text>
+                  <Text style={styles.kycStatusText}>{providerProfile?.badge_eligibility_message || 'Complete provider KYC and build strong service ratings to qualify.'}</Text>
+                </View>
+              </View>
+              <View style={styles.badgeStatsGrid}>
+                <View style={styles.badgeStatCard}><Text style={styles.badgeStatValue}>{providerProfile?.badge_activity_percentage ?? 0}%</Text><Text style={styles.badgeStatLabel}>Activity</Text></View>
+                <View style={styles.badgeStatCard}><Text style={styles.badgeStatValue}>{providerProfile?.badge_reliability_percentage ?? 0}%</Text><Text style={styles.badgeStatLabel}>Reliability</Text></View>
+                <View style={styles.badgeStatCard}><Text style={styles.badgeStatValue}>{providerProfile?.badge_quality_percentage ?? 0}%</Text><Text style={styles.badgeStatLabel}>Quality</Text></View>
+                <View style={styles.badgeStatCard}><Text style={styles.badgeStatValue}>{providerProfile?.badge_trust_percentage ?? 0}%</Text><Text style={styles.badgeStatLabel}>Trust</Text></View>
+              </View>
+              <View style={styles.badgeRequirementBox}>
+                <Text style={styles.badgeRequirementTitle}>Badge requirements</Text>
+                <Text style={styles.badgeRequirementText}>Activity, Reliability & Quality at or above 50%. Trust at 100% (approved KYC).</Text>
+                <Text style={styles.badgeRequirementPrice}>Fee: {formatMoney(providerProfile?.badge_fee || 15000)}</Text>
+              </View>
+              {providerProfile?.badge_verification_status !== 'verified' ? (
+                <TouchableOpacity activeOpacity={0.85} onPress={buyTrustBadge} disabled={!providerProfile?.badge_is_eligible || saving} style={[styles.saveButton, (!providerProfile?.badge_is_eligible || saving) && styles.disabledButton]}>
+                  {saving ? <ActivityIndicator color={colors.white} /> : <Text style={styles.saveButtonText}>{providerProfile?.badge_is_eligible ? `Pay ${formatMoney(providerProfile?.badge_fee || 15000)} for Trust Badge` : 'Not Eligible Yet'}</Text>}
+                </TouchableOpacity>
+              ) : (
+                <View style={styles.badgeActivePreview}>
+                  <TrustBadge size={36} />
+                  <Text style={styles.badgeActivePreviewText}>Your blue verified badge is visible on your provider profile.</Text>
+                </View>
+              )}
             </View>
           ) : null}
         </View>
@@ -3161,7 +4081,7 @@ const styles = StyleSheet.create({
   exploreHeaderStack: { gap: 20, marginBottom: 8 },
   exploreTopCard: { minHeight: 78, borderRadius: 0, backgroundColor: colors.background, padding: 12, flexDirection: 'row', alignItems: 'center', gap: 10 },
   locationBadge: { width: 36, height: 36, borderRadius: 12, borderWidth: 1, borderColor: 'rgba(242,101,34,0.45)', backgroundColor: '#182237', alignItems: 'center', justifyContent: 'center' },
-  locationInitial: { color: colors.orange, fontWeight: '900' },
+  locationLogo: { width: 30, height: 30, borderRadius: 9 },
   exploreOverline: { color: '#8FA0B8', fontSize: 9, fontWeight: '900' },
   exploreLocation: { color: colors.orange, fontSize: 11, fontWeight: '900' },
   exploreSearch: { flex: 2, minHeight: 40, borderRadius: 12, backgroundColor: '#132541', paddingHorizontal: 12, flexDirection: 'row', alignItems: 'center', gap: 8 },
@@ -3308,8 +4228,17 @@ const styles = StyleSheet.create({
   serviceDescription: { color: '#C8D3E4', fontSize: 14, lineHeight: 22 },
   serviceDivider: { height: 1, backgroundColor: 'rgba(255,255,255,0.12)', marginTop: 8 },
   reviewsTitle: { color: colors.primary, fontSize: 18, fontWeight: '900', marginTop: 8 },
+  inlineReviewBox: { backgroundColor: colors.white, borderRadius: 18, padding: 14, gap: 10, borderWidth: 1, borderColor: colors.border },
+  inlineReviewTitle: { color: colors.textDark, fontSize: 15, fontWeight: '900' },
+  inlineReviewStars: { flexDirection: 'row', alignItems: 'center', gap: 3 },
+  inlineReviewStarButton: { width: 34, height: 34, alignItems: 'center', justifyContent: 'center' },
+  inlineReviewInput: { minHeight: 94, borderRadius: 14, backgroundColor: colors.inputBg, color: colors.textDark, fontSize: 14, lineHeight: 20, padding: 12, textAlignVertical: 'top', fontFamily: 'DMSans_400Regular' },
+  inlineReviewInputDisabled: { opacity: 0.75 },
+  inlineReviewButton: { height: 46, borderRadius: 14, backgroundColor: colors.orange, alignItems: 'center', justifyContent: 'center' },
+  inlineReviewButtonText: { color: colors.white, fontSize: 12, fontWeight: '900', letterSpacing: 1 },
   reviewCard: { backgroundColor: '#132541', borderRadius: 18, padding: 16, gap: 8 },
   reviewName: { color: '#D8E2F1', fontWeight: '900' },
+  reviewStarsRow: { flexDirection: 'row', alignItems: 'center', gap: 1 },
   reviewStars: { color: colors.orange, fontWeight: '900' },
   reviewQuote: { color: '#8FA0B8', fontSize: 12, lineHeight: 18, fontStyle: 'italic' },
   bookingsContent: { padding: 16, gap: 18, paddingBottom: 120 },
@@ -3359,6 +4288,10 @@ const styles = StyleSheet.create({
   paymentPinCancelText: { color: colors.textGray, fontSize: 12, fontWeight: '900' },
   paymentPinConfirm: { flex: 1, height: 48, borderRadius: 14, backgroundColor: colors.orange, alignItems: 'center', justifyContent: 'center' },
   paymentPinConfirmText: { color: colors.white, fontSize: 12, fontWeight: '900', letterSpacing: 1 },
+  reviewModalCard: { width: '100%', maxWidth: 370, backgroundColor: colors.white, borderRadius: 28, padding: 22, alignItems: 'center', gap: 13, shadowColor: colors.navy, shadowOpacity: 0.22, shadowRadius: 18, shadowOffset: { width: 0, height: 8 }, elevation: 12 },
+  reviewStarRow: { flexDirection: 'row', justifyContent: 'center', gap: 4, marginVertical: 4 },
+  reviewStarButton: { width: 44, height: 44, alignItems: 'center', justifyContent: 'center' },
+  reviewCommentInput: { alignSelf: 'stretch', minHeight: 110, borderRadius: 16, backgroundColor: colors.inputBg, color: colors.textDark, fontSize: 14, lineHeight: 20, padding: 14, textAlignVertical: 'top', fontFamily: 'DMSans_400Regular' },
   escrowInfoBox: { minHeight: 86, borderRadius: 28, borderWidth: 1, borderColor: 'rgba(59,130,246,0.35)', flexDirection: 'row', alignItems: 'center', gap: 14, padding: 18, marginTop: 12 },
   escrowInfoTitle: { color: colors.primary, fontSize: 15, fontWeight: '900' },
   escrowInfoText: { color: '#6EA8FF', fontSize: 12, lineHeight: 18 },
@@ -3426,6 +4359,8 @@ const styles = StyleSheet.create({
   walletKycLockNotice: { minHeight: 62, borderRadius: 16, borderWidth: 1, borderColor: 'rgba(242,101,34,0.35)', backgroundColor: 'rgba(242,101,34,0.1)', padding: 12, flexDirection: 'row', alignItems: 'center', gap: 10 },
   walletKycLockTitle: { color: colors.orange, fontSize: 13, fontWeight: '900' },
   walletKycLockText: { color: '#B9C5D8', fontSize: 11, lineHeight: 16, marginTop: 2, textTransform: 'capitalize' },
+  walletPinPromptCard: { borderRadius: 16, borderWidth: 1, borderColor: 'rgba(242,101,34,0.35)', backgroundColor: 'rgba(242,101,34,0.1)', padding: 12, gap: 12 },
+  walletPinPromptActions: { flexDirection: 'row', gap: 10 },
   walletPinResetRow: { alignItems: 'center', marginTop: -4 },
   walletPinResetButton: { minHeight: 42, borderRadius: 14, borderWidth: 1, borderColor: 'rgba(242,101,34,0.28)', paddingHorizontal: 14, flexDirection: 'row', alignItems: 'center', justifyContent: 'center', gap: 8 },
   walletPinResetText: { color: colors.orange, fontSize: 11, fontWeight: '900', letterSpacing: 1 },
@@ -3449,6 +4384,7 @@ const styles = StyleSheet.create({
   legendLabel: { color: '#B9C5D8', fontSize: 10, fontWeight: '900', lineHeight: 16 },
   legendValue: { color: colors.white, fontSize: 13 },
   walletActivityHeader: { flexDirection: 'row', alignItems: 'center', justifyContent: 'space-between', marginTop: 4 },
+  walletRefreshButton: { flexDirection: 'row', alignItems: 'center', gap: 8, minHeight: 36 },
   walletActivityTitle: { color: colors.orange, fontSize: 18, fontWeight: '900' },
   walletActivityCard: { backgroundColor: '#132541', borderRadius: 22, padding: 16, flexDirection: 'row', alignItems: 'center', gap: 12 },
   walletActivityIcon: { width: 48, height: 48, borderRadius: 16, alignItems: 'center', justifyContent: 'center' },
@@ -3549,7 +4485,9 @@ const styles = StyleSheet.create({
   providerProfileBack: { flexDirection: 'row', alignItems: 'center', gap: 4, alignSelf: 'flex-start', paddingVertical: 4 },
   providerProfileBackText: { color: colors.textGray, fontSize: 12, fontWeight: '900' },
   providerProfileHero: { backgroundColor: colors.white, borderRadius: 28, padding: 24, alignItems: 'center', gap: 10, shadowColor: colors.navy, shadowOpacity: 0.08, shadowRadius: 12, shadowOffset: { width: 0, height: 5 }, elevation: 2 },
+  providerProfileAvatarWrap: { position: 'relative', overflow: 'visible', marginBottom: 4 },
   providerProfileAvatar: { width: 96, height: 96, borderRadius: 48, backgroundColor: '#132541', alignItems: 'center', justifyContent: 'center' },
+  providerProfileTrustBadge: { position: 'absolute', right: 0, bottom: 0, zIndex: 10, elevation: 8 },
   providerProfileAvatarImage: { width: 96, height: 96, borderRadius: 48 },
   providerProfileAvatarText: { color: colors.orange, fontSize: 32, fontWeight: '900' },
   providerProfileName: { color: colors.orange, fontSize: 28, fontWeight: '900', textAlign: 'center' },
@@ -3591,6 +4529,34 @@ const styles = StyleSheet.create({
   addListingDescription: { minHeight: 132, borderRadius: 18, backgroundColor: '#132541', borderWidth: 1, borderColor: 'rgba(10,25,47,0.08)', padding: 16, color: colors.white, fontSize: 15, lineHeight: 21, fontFamily: 'DMSans_400Regular' },
   addListingSubmit: { minHeight: 56, borderRadius: 16, backgroundColor: colors.orange, alignItems: 'center', justifyContent: 'center', shadowColor: colors.orange, shadowOpacity: 0.25, shadowRadius: 10, shadowOffset: { width: 0, height: 6 }, elevation: 3 },
   addListingSubmitText: { color: colors.white, fontSize: 15, fontWeight: '900' },
+  providerServiceDetailContent: { padding: 20, gap: 18, paddingBottom: 120 },
+  providerServiceHero: { minHeight: 210, borderRadius: 26, overflow: 'hidden', backgroundColor: colors.white, shadowColor: colors.navy, shadowOpacity: 0.08, shadowRadius: 12, shadowOffset: { width: 0, height: 5 }, elevation: 2 },
+  providerServiceHeroImage: { width: '100%', height: 210 },
+  providerServiceHeroEmpty: { minHeight: 210, alignItems: 'center', justifyContent: 'center', gap: 8, backgroundColor: '#F8FAFC' },
+  providerServiceHeroEmptyText: { color: colors.textGray, fontSize: 12, fontWeight: '800' },
+  providerServiceImageButton: { position: 'absolute', right: 14, bottom: 14, minHeight: 40, borderRadius: 14, backgroundColor: colors.orange, paddingHorizontal: 12, flexDirection: 'row', alignItems: 'center', gap: 6 },
+  providerServiceImageButtonText: { color: colors.white, fontSize: 11, fontWeight: '900' },
+  providerServiceStatsCard: { backgroundColor: colors.darkNavy, gap: 12 },
+  providerServiceStatsTitle: { color: colors.white, fontSize: 24, lineHeight: 30, fontWeight: '900' },
+  providerServiceMetricRow: { flexDirection: 'row', gap: 10 },
+  providerServiceMetric: { flex: 1, borderRadius: 16, backgroundColor: '#132541', padding: 12, gap: 4 },
+  providerServiceMetricValue: { color: colors.white, fontSize: 24, fontWeight: '900' },
+  providerServiceMetricLabel: { color: '#B9C5D8', fontSize: 10, fontWeight: '900', letterSpacing: 1 },
+  providerServiceMiniStats: { flexDirection: 'row', flexWrap: 'wrap', gap: 8 },
+  providerServiceMiniStat: { color: '#93C5FD', fontSize: 11, fontWeight: '800', backgroundColor: 'rgba(59,130,246,0.12)', borderRadius: 999, paddingHorizontal: 10, paddingVertical: 6 },
+  providerEditPanel: { backgroundColor: colors.white, borderRadius: 24, padding: 16, gap: 14, shadowColor: colors.navy, shadowOpacity: 0.08, shadowRadius: 10, shadowOffset: { width: 0, height: 4 }, elevation: 2 },
+  providerEditHeader: { flexDirection: 'row', justifyContent: 'space-between', alignItems: 'flex-start', gap: 10 },
+  providerEditTitleBlock: { flex: 1, minWidth: 0 },
+  providerEditToggle: { minHeight: 38, flexShrink: 0, borderRadius: 14, backgroundColor: '#FFF7ED', paddingHorizontal: 10, flexDirection: 'row', alignItems: 'center', justifyContent: 'center', gap: 4 },
+  providerEditToggleText: { color: colors.orange, fontSize: 11, fontWeight: '900' },
+  providerDeleteButton: { minHeight: 50, borderRadius: 16, borderWidth: 1, borderColor: 'rgba(239,68,68,0.3)', backgroundColor: '#FEF2F2', flexDirection: 'row', alignItems: 'center', justifyContent: 'center', gap: 8 },
+  providerDeleteButtonText: { color: colors.red, fontSize: 12, fontWeight: '900', letterSpacing: 0.8 },
+  availabilityToggle: { minHeight: 48, borderRadius: 16, backgroundColor: '#F8FAFC', borderWidth: 1, borderColor: colors.border, paddingHorizontal: 14, flexDirection: 'row', alignItems: 'center', gap: 10 },
+  availabilityToggleText: { color: colors.textDark, fontSize: 13, fontWeight: '800' },
+  providerServiceReadOnly: { gap: 12 },
+  providerServiceInfoRow: { gap: 4, paddingBottom: 10, borderBottomWidth: 1, borderBottomColor: colors.border },
+  providerServiceInfoValue: { color: colors.textDark, fontSize: 16, fontWeight: '900' },
+  providerServiceDescription: { color: colors.textGray, fontSize: 15, lineHeight: 22 },
   adminVerifyContent: { width: '100%', maxWidth: 1180, alignSelf: 'center', paddingHorizontal: Platform.OS === 'web' ? 28 : 18, paddingTop: Platform.OS === 'web' ? 28 : 18, gap: 22, paddingBottom: 80 },
   adminVerifyPageContent: { width: '100%', maxWidth: 1220, alignSelf: 'center', paddingHorizontal: Platform.OS === 'web' ? 32 : 18, paddingTop: Platform.OS === 'web' ? 28 : 18, gap: 22, paddingBottom: 80 },
   adminVerifyHeader: { backgroundColor: colors.white, borderRadius: 28, padding: Platform.OS === 'web' ? 24 : 18, gap: 12, shadowColor: colors.navy, shadowOpacity: 0.06, shadowRadius: 14, shadowOffset: { width: 0, height: 6 }, elevation: 2 },
@@ -3754,6 +4720,8 @@ const styles = StyleSheet.create({
   profileSettingsCard: { backgroundColor: '#132541', borderRadius: 28, padding: 20, gap: 18 },
   profileSettingsCardLight: { backgroundColor: colors.white },
   photoRow: { flexDirection: 'row', alignItems: 'center', gap: 16 },
+  photoCircleWrap: { position: 'relative', overflow: 'visible' },
+  accountTrustBadge: { position: 'absolute', right: 0, bottom: 0, zIndex: 10, elevation: 8 },
   photoCircle: { width: 96, height: 96, borderRadius: 48, borderWidth: 4, borderColor: 'rgba(255,255,255,0.08)', alignItems: 'center', justifyContent: 'center' },
   photoCircleLight: { borderColor: colors.border, backgroundColor: colors.inputBg },
   accountPhotoImage: { width: '100%', height: '100%', borderRadius: 48 },
@@ -3772,11 +4740,23 @@ const styles = StyleSheet.create({
   kycStatusCardLight: { backgroundColor: colors.inputBg, borderColor: colors.border },
   kycStatusIcon: { width: 52, height: 52, borderRadius: 18, alignItems: 'center', justifyContent: 'center' },
   kycStatusIconApproved: { backgroundColor: 'rgba(16,185,129,0.12)' },
+  kycStatusIconBadge: { backgroundColor: 'rgba(59,130,246,0.12)' },
   kycStatusIconRejected: { backgroundColor: 'rgba(239,68,68,0.12)' },
   kycStatusIconPending: { backgroundColor: 'rgba(242,101,34,0.12)' },
   kycStatusTitle: { color: colors.white, fontSize: 17, fontWeight: '900', letterSpacing: 1 },
   kycStatusTitleLight: { color: colors.textDark },
   kycStatusText: { color: '#8FA0B8', fontSize: 13, lineHeight: 19, marginTop: 4 },
+  badgeStatsGrid: { flexDirection: 'row', gap: 10 },
+  badgeStatCard: { flex: 1, minHeight: 78, borderRadius: 16, backgroundColor: '#132541', padding: 12, justifyContent: 'center', gap: 4 },
+  badgeStatValue: { color: colors.white, fontSize: 20, fontWeight: '900' },
+  badgeStatLabel: { color: '#B9C5D8', fontSize: 10, fontWeight: '900', letterSpacing: 1 },
+  badgeRequirementBox: { borderRadius: 18, backgroundColor: '#FFF7ED', borderWidth: 1, borderColor: 'rgba(242,101,34,0.2)', padding: 14, gap: 6 },
+  badgeRequirementTitle: { color: colors.orange, fontSize: 14, fontWeight: '900' },
+  badgeRequirementText: { color: colors.textGray, fontSize: 12, lineHeight: 18 },
+  badgeRequirementPrice: { color: colors.textDark, fontSize: 13, fontWeight: '900' },
+  badgeActivePreview: { flexDirection: 'row', alignItems: 'center', gap: 12, borderRadius: 18, backgroundColor: 'rgba(59,130,246,0.08)', borderWidth: 1, borderColor: 'rgba(59,130,246,0.2)', padding: 14 },
+  badgeActivePreviewText: { flex: 1, color: colors.textGray, fontSize: 13, lineHeight: 19 },
+  providerVerifiedRow: { flexDirection: 'row', alignItems: 'center', gap: 6, marginTop: 2 },
   settingsEditableInput: { flex: 1, color: colors.white, fontSize: 15, fontWeight: '800', paddingVertical: 12, fontFamily: 'DMSans_700Bold' },
   settingsEditableInputLight: { color: colors.textDark },
   settingsInputText: { color: colors.white, fontSize: 15, fontWeight: '800' },
@@ -3811,7 +4791,7 @@ const styles = StyleSheet.create({
   bookingCard: { marginBottom: 12, borderRadius: 16 },
   bookingMeta: { flexDirection: 'row', alignItems: 'center', justifyContent: 'space-between', marginTop: 12 },
   bookingServiceTitle: { color: colors.orange, fontSize: 16, fontWeight: '900' },
-  bookingBottomTabs: { minHeight: 76, backgroundColor: colors.white, borderTopWidth: 1, borderTopColor: colors.border, flexDirection: 'row', alignItems: 'center', justifyContent: 'space-around', paddingTop: 8, paddingBottom: 10, shadowColor: colors.navy, shadowOpacity: 0.08, shadowRadius: 10, shadowOffset: { width: 0, height: -4 }, elevation: 8 },
+  bookingBottomTabs: { minHeight: Platform.OS === 'ios' ? 88 : 76, backgroundColor: colors.white, borderTopWidth: 1, borderTopColor: colors.border, flexDirection: 'row', alignItems: 'center', justifyContent: 'space-around', paddingTop: 8, paddingBottom: Platform.OS === 'ios' ? 22 : 12, shadowColor: colors.navy, shadowOpacity: 0.08, shadowRadius: 10, shadowOffset: { width: 0, height: -4 }, elevation: 8 },
   bookingBottomTab: { flex: 1, alignItems: 'center', justifyContent: 'center', gap: 4 },
   bookingBottomLabel: { color: '#9CA3AF', fontSize: 11, fontWeight: '800' },
   bookingBottomLabelActive: { color: colors.orange },
@@ -3837,7 +4817,7 @@ const styles = StyleSheet.create({
   txMoney: { color: colors.green, fontWeight: '900' },
   txMoneyOut: { color: colors.red },
   chatHeader: { flexDirection: 'row', alignItems: 'center', gap: 12, padding: 16, backgroundColor: colors.white, borderBottomWidth: 1, borderColor: colors.border },
-  avatarWrap: { position: 'relative' },
+  avatarWrap: { position: 'relative', overflow: 'visible' },
   onlineDot: { position: 'absolute', right: 0, bottom: 2, width: 12, height: 12, borderRadius: 6, backgroundColor: colors.green, borderWidth: 2, borderColor: colors.white },
   offlineDot: { backgroundColor: '#9CA3AF' },
   datePill: { alignSelf: 'center', marginTop: 12, backgroundColor: colors.white, borderRadius: 999, paddingHorizontal: 12, paddingVertical: 8 },
@@ -3854,8 +4834,10 @@ const styles = StyleSheet.create({
   timestampRight: { textAlign: 'right' },
   composer: { flexDirection: 'row', alignItems: 'center', padding: 12, gap: 12, backgroundColor: colors.white, borderTopWidth: 1, borderColor: colors.border },
   sendButton: { width: 44, height: 44, borderRadius: 22, backgroundColor: colors.primary, alignItems: 'center', justifyContent: 'center' },
-  providerHeader: { flexDirection: 'row', alignItems: 'center', gap: 12 },
+  providerHeader: { flexDirection: 'row', alignItems: 'center', gap: 12, overflow: 'visible' },
   verifiedLabel: { color: colors.green, fontSize: 11, fontWeight: '900' },
+  verifiedLabelBlue: { color: colors.blue },
+  providerNeutralLabel: { color: colors.textGray, fontSize: 11, fontWeight: '900' },
   providerBalance: { backgroundColor: colors.darkNavy, gap: 8 },
   providerBalanceText: { color: colors.white, fontSize: 34, fontWeight: '900' },
   trend: { color: colors.green, fontWeight: '800' },
@@ -3864,6 +4846,7 @@ const styles = StyleSheet.create({
   statsGrid: { flexDirection: 'row', gap: 12 },
   statCard: { flex: 1, gap: 8 },
   statValue: { color: colors.textDark, fontSize: 22, fontWeight: '900' },
+  statMeta: { color: colors.textGray, fontSize: 11, lineHeight: 15, fontWeight: '700' },
   providerFilterPanel: { gap: 12 },
   providerSearchBox: { minHeight: 50, borderRadius: 16, backgroundColor: '#132541', paddingHorizontal: 14, flexDirection: 'row', alignItems: 'center', gap: 10 },
   providerSearchInput: { flex: 1, color: colors.white, fontSize: 14, paddingVertical: 0, fontFamily: 'DMSans_400Regular' },
@@ -3872,6 +4855,8 @@ const styles = StyleSheet.create({
   providerCategoryChipActive: { backgroundColor: colors.orange, borderColor: colors.orange },
   providerCategoryText: { color: colors.textGray, fontSize: 11, fontWeight: '900' },
   providerCategoryTextActive: { color: colors.white },
+  providerClearFilters: { alignSelf: 'flex-start', minHeight: 38, borderRadius: 14, backgroundColor: '#FFF7ED', borderWidth: 1, borderColor: 'rgba(242,101,34,0.18)', paddingHorizontal: 12, flexDirection: 'row', alignItems: 'center', gap: 8 },
+  providerClearFiltersText: { color: colors.orange, fontSize: 11, fontWeight: '900', letterSpacing: 0.8 },
   requestCard: { gap: 12 },
   requestActions: { flexDirection: 'row', gap: 8 },
   acceptButton: { flex: 1, height: 44, borderRadius: 14, backgroundColor: colors.darkNavy, alignItems: 'center', justifyContent: 'center' },
@@ -3880,6 +4865,14 @@ const styles = StyleSheet.create({
   declineText: { color: colors.textDark, fontWeight: '900' },
   listingCard: { flexDirection: 'row', alignItems: 'center', gap: 12 },
   providerListingCard: { backgroundColor: colors.white, borderRadius: 24, padding: 16, shadowColor: colors.navy, shadowOpacity: 0.08, shadowRadius: 10, shadowOffset: { width: 0, height: 4 }, elevation: 2 },
+  providerServiceCard: { backgroundColor: colors.white, borderRadius: 24, padding: 16, flexDirection: 'row', alignItems: 'center', gap: 12, shadowColor: colors.navy, shadowOpacity: 0.08, shadowRadius: 10, shadowOffset: { width: 0, height: 4 }, elevation: 2 },
+  providerListingTopRow: { flexDirection: 'row', alignItems: 'center', justifyContent: 'space-between', gap: 8 },
+  availabilityPill: { borderRadius: 999, backgroundColor: '#DCFCE7', paddingHorizontal: 8, paddingVertical: 4 },
+  availabilityPillOff: { backgroundColor: '#F3F4F6' },
+  availabilityPillText: { color: colors.green, fontSize: 9, fontWeight: '900', letterSpacing: 0.8 },
+  availabilityPillTextOff: { color: colors.textGray },
+  providerListingStats: { flexDirection: 'row', flexWrap: 'wrap', gap: 6, marginTop: 8 },
+  providerListingStatText: { color: colors.blue, fontSize: 10, fontWeight: '900', backgroundColor: '#EFF6FF', borderRadius: 999, paddingHorizontal: 8, paddingVertical: 4 },
   listingImage: { width: 80, height: 64, borderRadius: 16, backgroundColor: colors.inputBg },
   emptyListingCard: { backgroundColor: colors.white, borderRadius: 24, padding: 16, flexDirection: 'row', alignItems: 'center', gap: 12, shadowColor: colors.navy, shadowOpacity: 0.08, shadowRadius: 10, shadowOffset: { width: 0, height: 4 }, elevation: 2 },
   fab: { position: 'absolute', bottom: 100, right: 20, width: 60, height: 60, borderRadius: 30, backgroundColor: colors.orange, alignItems: 'center', justifyContent: 'center', shadowColor: colors.orange, shadowOpacity: 0.35, shadowRadius: 12, shadowOffset: { width: 0, height: 6 }, elevation: 4 },

@@ -7,6 +7,15 @@ const AuthContext = createContext(null);
 const SESSION_LAST_ACTIVE_KEY = 'session_last_active_at';
 const INACTIVITY_LIMIT_MS = 30 * 24 * 60 * 60 * 1000;
 
+const versionUserProfilePhoto = (userData) => {
+  if (!userData?.profile_photo || !userData?.profile_photo_updated_at) return userData;
+  const separator = String(userData.profile_photo).includes('?') ? '&' : '?';
+  return {
+    ...userData,
+    profile_photo: `${userData.profile_photo}${separator}v=${encodeURIComponent(userData.profile_photo_updated_at)}`
+  };
+};
+
 export function AuthProvider({ children }) {
   const [user, setUser] = useState(null);
   const [booting, setBooting] = useState(true);
@@ -20,8 +29,15 @@ export function AuthProvider({ children }) {
       if (inactiveTooLong) {
         await AsyncStorage.multiRemove(['access_token', 'refresh_token', 'user', SESSION_LAST_ACTIVE_KEY]);
       } else if (savedUser && token) {
-        setUser(JSON.parse(savedUser));
+        const parsedUser = versionUserProfilePhoto(JSON.parse(savedUser));
+        setUser(parsedUser);
         await AsyncStorage.setItem(SESSION_LAST_ACTIVE_KEY, String(Date.now()));
+        try {
+          const { data } = await api.get('/api/users/profile/');
+          const freshUser = versionUserProfilePhoto(data);
+          await AsyncStorage.setItem('user', JSON.stringify(freshUser));
+          setUser(freshUser);
+        } catch (_) {}
       }
       setBooting(false);
     };
@@ -51,11 +67,19 @@ export function AuthProvider({ children }) {
   }, [user]);
 
   const saveSession = async (data) => {
+    const sessionUser = versionUserProfilePhoto(data.user);
     await AsyncStorage.setItem('access_token', data.access);
     await AsyncStorage.setItem('refresh_token', data.refresh);
-    await AsyncStorage.setItem('user', JSON.stringify(data.user));
+    await AsyncStorage.setItem('user', JSON.stringify(sessionUser));
     await AsyncStorage.setItem(SESSION_LAST_ACTIVE_KEY, String(Date.now()));
-    setUser(data.user);
+    setUser(sessionUser);
+  };
+
+  const updateUser = async (nextUser) => {
+    const sessionUser = versionUserProfilePhoto(nextUser);
+    await AsyncStorage.setItem('user', JSON.stringify(sessionUser));
+    setUser(sessionUser);
+    return sessionUser;
   };
 
   const login = async (email, password) => {
@@ -101,7 +125,7 @@ export function AuthProvider({ children }) {
     setUser(null);
   };
 
-  const value = useMemo(() => ({ user, booting, login, register, verifyEmailCode, logout, setUser }), [user, booting]);
+  const value = useMemo(() => ({ user, booting, login, register, verifyEmailCode, logout, setUser, updateUser }), [user, booting]);
 
   return <AuthContext.Provider value={value}>{children}</AuthContext.Provider>;
 }

@@ -9,7 +9,8 @@ from rest_framework.response import Response
 from rest_framework.views import APIView
 from services.models import Service
 from wallet.models import Transaction, Wallet
-from users.models import Notification
+from wallet.utils import reconcile_wallet_balance
+from users.models import Notification, User
 from .models import Booking
 from .serializers import BookingSerializer, BookingStatusSerializer
 
@@ -67,6 +68,7 @@ def release_escrow(booking, reason='client_confirmed'):
             amount=payout,
             description=f'Escrow released for booking #{locked_booking.pk} after 5% Servista fee',
         )
+        provider_wallet = reconcile_wallet_balance(provider_wallet)
         locked_booking.platform_fee = fee
         locked_booking.payment_status = 'released'
         locked_booking.escrow_released_at = timezone.now()
@@ -83,7 +85,7 @@ def release_escrow(booking, reason='client_confirmed'):
             f'{payout} XAF has been released to your wallet for {locked_booking.service.title}.',
             detail=f'Servista fee: {fee} XAF. Booking #{locked_booking.pk}.',
             icon='wallet-outline',
-            tone='green',
+            tone='success',
         )
     return locked_booking, payout
 
@@ -193,7 +195,7 @@ class BookingStatusUpdateView(APIView):
                     updated_booking.client,
                     'Provider marked job completed',
                     f'{updated_booking.service.provider.full_name or "Your provider"} marked {updated_booking.service.title} completed. Please confirm or report an issue.',
-                    detail='If you do nothing, escrow will release automatically after 24 hours.',
+                    detail='Confirm the service if everything is complete. Admin will then review and release the escrow payout.',
                     icon='checkmark-done-outline',
                     tone='warning',
                 )
@@ -245,17 +247,37 @@ class BookingConfirmCompletionView(APIView):
         if booking.client != request.user:
             return Response({'error': 'Only the client can confirm completion'}, status=status.HTTP_403_FORBIDDEN)
         if booking.payment_status != 'escrowed':
-            return Response({'error': 'Only escrowed bookings can be confirmed'}, status=status.HTTP_400_BAD_REQUEST)
-        if not booking.provider_marked_completed_at:
+            if booking.payment_status == 'unpaid' and booking_has_payment(booking):
+                booking.payment_status = 'escrowed'
+                booking.save(update_fields=['payment_status'])
+            else:
+                return Response({'error': 'Only escrowed bookings can be confirmed'}, status=status.HTTP_400_BAD_REQUEST)
+        if not booking.provider_marked_completed_at and booking.status != 'completed':
             return Response({'error': 'The provider has not marked this job completed yet'}, status=status.HTTP_400_BAD_REQUEST)
+        if not booking.provider_marked_completed_at:
+            booking.provider_marked_completed_at = timezone.now()
+            booking.save(update_fields=['provider_marked_completed_at'])
         if booking.issue_reported_at or booking.refund_status == 'requested':
             return Response({'error': 'This booking has a pending issue and needs admin review'}, status=status.HTTP_400_BAD_REQUEST)
         booking.client_confirmed_at = timezone.now()
         booking.save(update_fields=['client_confirmed_at'])
-        try:
-            booking, _ = release_escrow(booking, reason='client_confirmed')
-        except ValueError as exc:
-            return Response({'error': str(exc)}, status=status.HTTP_400_BAD_REQUEST)
+        for admin in User.objects.filter(role='admin'):
+            create_notification(
+                admin,
+                'Escrow ready for release',
+                f'{booking.client.full_name or "A client"} confirmed completion for {booking.service.title}.',
+                detail=f'Booking #{booking.pk} is ready for admin payout review. Release {booking.amount} XAF minus the 5% Servista fee to {booking.service.provider.full_name or booking.service.provider.email}.',
+                icon='wallet-outline',
+                tone='warning',
+            )
+        create_notification(
+            booking.service.provider,
+            'Client confirmed completion',
+            f'{booking.client.full_name or "The client"} confirmed {booking.service.title}.',
+            detail='Admin has been notified to review and release the escrow payout.',
+            icon='checkmark-circle-outline',
+            tone='success',
+        )
         return Response(BookingSerializer(booking).data)
 
 
@@ -333,6 +355,7 @@ class AdminRefundUpdateView(APIView):
                     )
                 provider_wallet.balance -= booking.amount
                 provider_wallet.save(update_fields=['balance', 'updated_at'])
+                provider_wallet = reconcile_wallet_balance(provider_wallet)
             client_wallet.balance += booking.amount
             client_wallet.save(update_fields=['balance', 'updated_at'])
             Transaction.objects.create(
@@ -342,6 +365,7 @@ class AdminRefundUpdateView(APIView):
                 amount=booking.amount,
                 description=f'Refund approved for booking #{booking.pk}',
             )
+            client_wallet = reconcile_wallet_balance(client_wallet)
             booking.refund_status = 'approved'
             booking.payment_status = 'refunded'
             booking.status = 'cancelled'
@@ -352,7 +376,7 @@ class AdminRefundUpdateView(APIView):
                 f'{booking.amount} XAF has been returned to your wallet for {booking.service.title}.',
                 detail=f'Booking #{booking.pk}',
                 icon='refresh-circle-outline',
-                tone='green',
+                tone='success',
             )
         return Response(BookingSerializer(booking).data)
 

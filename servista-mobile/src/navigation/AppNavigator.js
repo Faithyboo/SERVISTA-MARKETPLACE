@@ -4,6 +4,14 @@ import { createNativeStackNavigator } from '@react-navigation/native-stack';
 import { useEffect, useState } from 'react';
 import { Platform } from 'react-native';
 import { AdminLoginScreen, LoginScreen, RegisterScreen, SplashScreen } from '../screens/AuthScreens';
+import DSSDashboardScreen from '../screens/admin/DSSDashboardScreen';
+import ProviderScoresScreen from '../screens/admin/ProviderScoresScreen';
+import ProviderScoreDetailScreen from '../screens/admin/ProviderScoreDetailScreen';
+import FraudAlertsScreen from '../screens/admin/FraudAlertsScreen';
+import ReportsScreen from '../screens/admin/ReportsScreen';
+import ReportDetailScreen from '../screens/admin/ReportDetailScreen';
+import BatchVerificationScreen from '../screens/admin/BatchVerificationScreen';
+import BadgeVerificationScreen from '../screens/admin/BadgeVerificationScreen';
 import {
   AccountScreen,
   AddServiceScreen,
@@ -24,6 +32,7 @@ import {
   NotificationsScreen,
   ProviderDashboardScreen,
   ProviderProfileScreen,
+  ProviderServiceDetailScreen,
   ServiceDetailScreen,
   WalletScreen
 } from '../screens/MainScreens';
@@ -59,11 +68,11 @@ function tabOptions({ route }) {
     headerShown: false,
     tabBarActiveTintColor: colors.primary,
     tabBarInactiveTintColor: '#9CA3AF',
-    tabBarLabelStyle: { fontSize: 11, fontWeight: '800' },
+    tabBarLabelStyle: { fontSize: 11, fontWeight: '800', marginTop: 1 },
     tabBarStyle: {
-      height: 65,
+      height: Platform.OS === 'ios' ? 88 : 76,
       paddingTop: 8,
-      paddingBottom: 8,
+      paddingBottom: Platform.OS === 'ios' ? 22 : 12,
       backgroundColor: colors.white,
       borderTopColor: colors.border,
       shadowColor: colors.navy,
@@ -147,8 +156,24 @@ function AdminTabs() {
   );
 }
 
+function AdminStack() {
+  return (
+    <Stack.Navigator screenOptions={{ headerShown: false }}>
+      <Stack.Screen name="Tabs" component={AdminTabs} />
+      <Stack.Screen name="DSSAIPanel" component={DSSDashboardScreen} />
+      <Stack.Screen name="ProviderScores" component={ProviderScoresScreen} />
+      <Stack.Screen name="ProviderScoreDetail" component={ProviderScoreDetailScreen} />
+      <Stack.Screen name="FraudAlerts" component={FraudAlertsScreen} />
+      <Stack.Screen name="Reports" component={ReportsScreen} />
+      <Stack.Screen name="ReportDetail" component={ReportDetailScreen} />
+      <Stack.Screen name="BatchVerification" component={BatchVerificationScreen} />
+      <Stack.Screen name="BadgeVerification" component={BadgeVerificationScreen} />
+    </Stack.Navigator>
+  );
+}
+
 function MainStack({ role }) {
-  const Tabs = role === 'provider' ? ProviderTabs : role === 'admin' ? AdminTabs : ClientTabs;
+  const Tabs = role === 'provider' ? ProviderTabs : role === 'admin' ? AdminStack : ClientTabs;
   return (
     <Stack.Navigator screenOptions={{ headerShown: false }}>
       <Stack.Screen name="Tabs" component={Tabs} />
@@ -159,6 +184,7 @@ function MainStack({ role }) {
       <Stack.Screen name="Bookings" component={BookingsScreen} />
       <Stack.Screen name="ChatThread" component={ChatScreen} />
       <Stack.Screen name="ProviderProfile" component={ProviderProfileScreen} />
+      <Stack.Screen name="ProviderServiceDetail" component={ProviderServiceDetailScreen} />
       <Stack.Screen name="AddService" component={AddServiceScreen} />
       <Stack.Screen name="ChangePassword" component={ChangePasswordScreen} />
       <Stack.Screen name="Notifications" component={NotificationsScreen} />

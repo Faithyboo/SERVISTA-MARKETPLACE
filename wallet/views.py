@@ -8,6 +8,7 @@ from rest_framework.views import APIView
 from bookings.models import Booking
 from .models import Transaction, Wallet
 from .serializers import TopUpSerializer, WalletPinResetDecisionSerializer, WalletPinSerializer, WalletSerializer
+from .utils import get_reconciled_wallet, reconcile_wallet_balance
 
 
 def get_wallet(user):
@@ -26,7 +27,7 @@ class WalletDetailView(APIView):
     permission_classes = [IsAuthenticated]
 
     def get(self, request):
-        wallet = get_wallet(request.user)
+        wallet = get_reconciled_wallet(request.user)
         return Response(WalletSerializer(wallet).data)
 
 
@@ -53,6 +54,7 @@ class WalletTopUpView(APIView):
                 amount=amount,
                 description='Wallet top up',
             )
+            wallet = reconcile_wallet_balance(wallet)
         return Response(WalletSerializer(wallet).data, status=status.HTTP_201_CREATED)
 
 
@@ -77,6 +79,37 @@ class WalletPinView(APIView):
         wallet.pin_reset_requested_at = None
         wallet.save(update_fields=['pin_hash', 'pin_reset_status', 'pin_reset_requested_at', 'updated_at'])
         return Response(WalletSerializer(wallet).data, status=status.HTTP_200_OK)
+
+
+class WalletPinVerifyView(APIView):
+    permission_classes = [IsAuthenticated]
+
+    def post(self, request):
+        wallet = get_wallet(request.user)
+        pin = str(request.data.get('pin', ''))
+        if not wallet.pin_hash:
+            return Response({'verified': True, 'wallet': WalletSerializer(wallet).data})
+        if not pin:
+            return Response({'error': 'Wallet PIN is required.'}, status=status.HTTP_400_BAD_REQUEST)
+        if not check_password(pin, wallet.pin_hash):
+            return Response({'error': 'Invalid wallet PIN.'}, status=status.HTTP_400_BAD_REQUEST)
+        return Response({'verified': True, 'wallet': WalletSerializer(get_reconciled_wallet(request.user)).data})
+
+
+class WalletPinPreferenceView(APIView):
+    permission_classes = [IsAuthenticated]
+
+    def patch(self, request):
+        wallet = get_wallet(request.user)
+        required = bool(request.data.get('pin_required_for_access', False))
+        if required and not wallet.pin_hash:
+            return Response(
+                {'error': 'Set a wallet PIN before requiring PIN access.'},
+                status=status.HTTP_400_BAD_REQUEST,
+            )
+        wallet.pin_required_for_access = required
+        wallet.save(update_fields=['pin_required_for_access', 'updated_at'])
+        return Response(WalletSerializer(wallet).data)
 
 
 class WalletPinResetRequestView(APIView):
@@ -161,4 +194,5 @@ class WalletPaymentView(APIView):
             booking.payment_status = 'escrowed'
             booking.refund_status = 'none'
             booking.save(update_fields=['payment_status', 'refund_status'])
+            client_wallet = reconcile_wallet_balance(client_wallet)
         return Response({'message': 'Payment successful', 'wallet': WalletSerializer(client_wallet).data})

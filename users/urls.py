@@ -1,5 +1,6 @@
 from django.urls import path
 from .views import (
+    AdminBadgeUpdateView,
     AdminKYCUpdateView,
     AdminPendingKYCListView,
     AdminUserListView,
@@ -10,6 +11,7 @@ from .views import (
     NotificationClearView,
     NotificationListView,
     NotificationReadView,
+    ProviderBadgePurchaseView,
     ProfileView,
     ProviderKYCView,
     ProviderProfileView,
@@ -30,9 +32,11 @@ urlpatterns = [
     path('notifications/read/', NotificationReadView.as_view(), name='notifications-read'),
     path('provider/profile/', ProviderProfileView.as_view(), name='provider-profile'),
     path('provider/kyc/', ProviderKYCView.as_view(), name='provider-kyc'),
+    path('provider/badge/', ProviderBadgePurchaseView.as_view(), name='provider-badge'),
     path('providers/', ApprovedProviderListView.as_view(), name='approved-providers'),
     path('admin/users/', AdminUserListView.as_view(), name='admin-users'),
     path('admin/kyc/', AdminPendingKYCListView.as_view(), name='admin-pending-kyc'),
     path('admin/kyc/<int:provider_id>/', AdminKYCUpdateView.as_view(), name='admin-update-kyc'),
+    path('admin/badge/<int:provider_id>/', AdminBadgeUpdateView.as_view(), name='admin-update-badge'),
     path('token/refresh/', TokenRefreshView.as_view(), name='token_refresh'),
 ]

@@ -14,6 +14,7 @@ class Wallet(models.Model):
     user = models.OneToOneField(User, on_delete=models.CASCADE, related_name='wallet')
     balance = models.DecimalField(max_digits=12, decimal_places=2, default=0)
     pin_hash = models.CharField(max_length=128, blank=True)
+    pin_required_for_access = models.BooleanField(default=False)
     pin_reset_status = models.CharField(max_length=20, choices=PIN_RESET_CHOICES, default='none')
     pin_reset_requested_at = models.DateTimeField(null=True, blank=True)
     updated_at = models.DateTimeField(auto_now=True)

@@ -12,6 +12,8 @@ class Message(models.Model):
     attachment_type = models.CharField(max_length=20, blank=True)
     attachment_name = models.CharField(max_length=255, blank=True)
     is_read = models.BooleanField(default=False)
+    hidden_for_sender = models.BooleanField(default=False)
+    hidden_for_receiver = models.BooleanField(default=False)
     sent_at = models.DateTimeField(auto_now_add=True)
 
     class Meta:

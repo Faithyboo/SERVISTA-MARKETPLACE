@@ -4,8 +4,9 @@ from rest_framework.response import Response
 from rest_framework.views import APIView
 from rest_framework.permissions import IsAuthenticated, AllowAny
 from rest_framework.parsers import FormParser, JSONParser, MultiPartParser
+from bookings.models import Booking
 from .models import Service
-from .serializers import ServiceSerializer
+from .serializers import ServiceReviewSerializer, ServiceSerializer
 
 
 class ServiceListView(APIView):
@@ -19,7 +20,15 @@ class ServiceListView(APIView):
     def get(self, request):
         category = request.query_params.get('category')
         search = request.query_params.get('search') or request.query_params.get('q')
-        services = Service.objects.filter(is_available=True).order_by('-created_at')
+        mine = request.query_params.get('mine') in {'1', 'true', 'yes'}
+        if mine:
+            if not request.user.is_authenticated:
+                return Response({'error': 'Authentication required'}, status=status.HTTP_401_UNAUTHORIZED)
+            if request.user.role != 'provider':
+                return Response({'error': 'Only providers can view their own listings'}, status=status.HTTP_403_FORBIDDEN)
+            services = Service.objects.filter(provider=request.user).order_by('-created_at')
+        else:
+            services = Service.objects.filter(is_available=True).order_by('-created_at')
         if category:
             services = services.filter(category=category)
         if search:
@@ -41,7 +50,7 @@ class ServiceListView(APIView):
             )
         serializer = ServiceSerializer(data=request.data)
         if serializer.is_valid():
-            serializer.save(provider=request.user)
+            serializer.save(provider=request.user, is_available=True)
             return Response(serializer.data, status=status.HTTP_201_CREATED)
         return Response(serializer.errors, status=status.HTTP_400_BAD_REQUEST)
 
@@ -87,3 +96,51 @@ class ServiceDetailView(APIView):
             return Response({'error': 'Not authorized'}, status=status.HTTP_403_FORBIDDEN)
         service.delete()
         return Response({'message': 'Service deleted'}, status=status.HTTP_204_NO_CONTENT)
+
+
+class ServiceReviewListCreateView(APIView):
+    def get_permissions(self):
+        if self.request.method == 'GET':
+            return [AllowAny()]
+        return [IsAuthenticated()]
+
+    def get_service(self, service_id):
+        try:
+            return Service.objects.get(pk=service_id)
+        except Service.DoesNotExist:
+            return None
+
+    def get(self, request, service_id):
+        service = self.get_service(service_id)
+        if not service:
+            return Response({'error': 'Service not found'}, status=status.HTTP_404_NOT_FOUND)
+        reviews = service.reviews.select_related('client', 'provider', 'service')
+        return Response(ServiceReviewSerializer(reviews, many=True).data)
+
+    def post(self, request, service_id):
+        if request.user.role != 'client':
+            return Response({'error': 'Only clients can leave reviews'}, status=status.HTTP_403_FORBIDDEN)
+        service = self.get_service(service_id)
+        if not service:
+            return Response({'error': 'Service not found'}, status=status.HTTP_404_NOT_FOUND)
+        booking_id = request.data.get('booking')
+        try:
+            booking = Booking.objects.select_related('service__provider', 'client').get(pk=booking_id, service=service)
+        except Booking.DoesNotExist:
+            return Response({'error': 'Booking not found for this service'}, status=status.HTTP_404_NOT_FOUND)
+        if booking.client != request.user:
+            return Response({'error': 'Only the client who booked this service can review it'}, status=status.HTTP_403_FORBIDDEN)
+        if not (booking.status == 'completed' or booking.client_confirmed_at or booking.payment_status == 'released'):
+            return Response({'error': 'You can review this provider after the service is completed'}, status=status.HTTP_400_BAD_REQUEST)
+        if hasattr(booking, 'review'):
+            return Response({'error': 'You already reviewed this booking'}, status=status.HTTP_400_BAD_REQUEST)
+        serializer = ServiceReviewSerializer(data=request.data)
+        if serializer.is_valid():
+            serializer.save(
+                service=service,
+                booking=booking,
+                client=request.user,
+                provider=service.provider,
+            )
+            return Response(serializer.data, status=status.HTTP_201_CREATED)
+        return Response(serializer.errors, status=status.HTTP_400_BAD_REQUEST)

@@ -3,9 +3,15 @@ from .models import Transaction, Wallet
 
 
 class TransactionSerializer(serializers.ModelSerializer):
+    booking_payment_status = serializers.CharField(source='booking.payment_status', read_only=True)
+    booking_status = serializers.CharField(source='booking.status', read_only=True)
+
     class Meta:
         model = Transaction
-        fields = ['id', 'booking', 'type', 'amount', 'description', 'created_at']
+        fields = [
+            'id', 'booking', 'booking_status', 'booking_payment_status',
+            'type', 'amount', 'description', 'created_at',
+        ]
 
 
 class WalletSerializer(serializers.ModelSerializer):
@@ -22,7 +28,7 @@ class WalletSerializer(serializers.ModelSerializer):
         fields = [
             'id', 'balance', 'updated_at', 'transactions',
             'provider_kyc_status', 'provider_wallet_locked',
-            'pin_is_set', 'pin_reset_status', 'pin_reset_requested_at',
+            'pin_is_set', 'pin_required_for_access', 'pin_reset_status', 'pin_reset_requested_at',
             'user_name', 'user_email', 'user_role',
         ]
 

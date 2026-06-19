@@ -32,3 +32,19 @@ class Service(models.Model):
 
     def __str__(self):
         return f"{self.title} by {self.provider.full_name}"
+
+
+class ServiceReview(models.Model):
+    service = models.ForeignKey(Service, on_delete=models.CASCADE, related_name='reviews')
+    booking = models.OneToOneField('bookings.Booking', on_delete=models.CASCADE, related_name='review')
+    client = models.ForeignKey(User, on_delete=models.CASCADE, related_name='service_reviews')
+    provider = models.ForeignKey(User, on_delete=models.CASCADE, related_name='provider_reviews')
+    rating = models.PositiveSmallIntegerField()
+    comment = models.TextField(blank=True)
+    created_at = models.DateTimeField(auto_now_add=True)
+
+    class Meta:
+        ordering = ['-created_at']
+
+    def __str__(self):
+        return f"{self.rating}/5 for {self.service.title}"

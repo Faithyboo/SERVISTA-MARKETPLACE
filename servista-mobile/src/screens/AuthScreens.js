@@ -1,12 +1,14 @@
 import { Ionicons } from '@expo/vector-icons';
 import { useState } from 'react';
-import { Alert, KeyboardAvoidingView, Platform, ScrollView, StyleSheet, Text as RNText, TouchableOpacity, View } from 'react-native';
+import { Alert, Image, KeyboardAvoidingView, Platform, ScrollView, StyleSheet, Text as RNText, TouchableOpacity, View } from 'react-native';
 import { SafeAreaView } from 'react-native-safe-area-context';
 import { Button, Input, Logo } from '../components/ui';
 import { useAuth } from '../context/AuthContext';
 import { useLanguage } from '../context/LanguageContext';
 import { colors } from '../theme/colors';
 import { withFont } from '../theme/typography';
+
+const servistaLogo = require('../../assets/servista-logo.png');
 
 function Text({ children, ...props }) {
   const { tn } = useLanguage();
@@ -16,6 +18,7 @@ function Text({ children, ...props }) {
 export function SplashScreen() {
   return (
     <SafeAreaView style={styles.splash}>
+      <Image source={servistaLogo} style={styles.splashLogoImage} resizeMode="contain" />
       <Logo dark />
       <Text style={styles.tagline}>Reliable Pros for Every Need</Text>
     </SafeAreaView>
@@ -43,7 +46,7 @@ export function LoginScreen({ navigation }) {
     const result = await login(email.trim(), password);
     if (result?.requires_2fa) {
       setChallenge(result);
-      setVerificationCode(result.dev_code || '');
+      setVerificationCode('');
     } else if (result?.error) setFormError(result.error);
     setLoading(false);
   };
@@ -79,7 +82,6 @@ export function LoginScreen({ navigation }) {
                 onChangeText={(value) => setVerificationCode(value.replace(/\D/g, '').slice(0, 6))}
                 style={styles.loginInput}
               />
-              {challenge.dev_code ? <Text style={styles.twoFactorDevText}>Development code: {challenge.dev_code}</Text> : null}
               {formError ? (
                 <View style={styles.loginErrorBox}>
                   <Ionicons name="alert-circle-outline" size={18} color={colors.danger} />
@@ -161,7 +163,7 @@ export function RegisterScreen({ navigation }) {
     const result = await register({ full_name: `${firstName} ${lastName}`.trim(), email, phone, role, password });
     if (result?.requires_2fa) {
       setChallenge(result);
-      setVerificationCode(result.dev_code || '');
+      setVerificationCode('');
     }
     setLoading(false);
   };
@@ -196,7 +198,6 @@ export function RegisterScreen({ navigation }) {
                   onChangeText={(value) => setVerificationCode(value.replace(/\D/g, '').slice(0, 6))}
                   style={styles.signupInput}
                 />
-                {challenge.dev_code ? <Text style={styles.twoFactorDevText}>Development code: {challenge.dev_code}</Text> : null}
                 <Button label="Verify Email" icon="shield-checkmark-outline" loading={loading} onPress={submitCode} />
                 <TouchableOpacity activeOpacity={0.8} onPress={() => setChallenge(null)}>
                   <Text style={styles.signupBottomText}>Use a different email</Text>
@@ -268,6 +269,7 @@ const styles = StyleSheet.create({
   darkScreen: { flex: 1, backgroundColor: colors.darkNavy },
   keyboard: { flex: 1 },
   splash: { flex: 1, backgroundColor: colors.navy, alignItems: 'center', justifyContent: 'center', gap: 14 },
+  splashLogoImage: { width: 96, height: 96, borderRadius: 24, marginBottom: 4 },
   tagline: { color: '#CBD5E1', fontSize: 16 },
   loginScroll: { flexGrow: 1, justifyContent: 'center', paddingHorizontal: 18, paddingVertical: 24 },
   loginPanel: {
