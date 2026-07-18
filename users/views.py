@@ -8,6 +8,7 @@ from django.conf import settings
 from django.contrib.auth import authenticate
 from django.contrib.auth.hashers import check_password, make_password
 from django.core.mail import send_mail
+from django.core.files.storage import FileSystemStorage
 from django.db import transaction
 from django.utils import timezone
 from rest_framework import status
@@ -261,15 +262,15 @@ class ProfileView(APIView):
         return Response(serializer.data)
 
     def put(self, request):
-        old_photo_path = request.user.profile_photo.path if request.user.profile_photo and 'profile_photo' in request.FILES else None
+        old_photo = request.user.profile_photo if request.user.profile_photo and 'profile_photo' in request.FILES else None
         serializer = UserSerializer(request.user, data=request.data, partial=True)
         if serializer.is_valid():
             save_kwargs = {}
             if 'profile_photo' in request.FILES:
                 save_kwargs['profile_photo_updated_at'] = timezone.now()
             user = serializer.save(**save_kwargs)
-            if old_photo_path and user.profile_photo and old_photo_path != user.profile_photo.path and os.path.exists(old_photo_path):
-                os.remove(old_photo_path)
+            if old_photo and isinstance(old_photo.storage, FileSystemStorage) and old_photo.name != user.profile_photo.name:
+                old_photo.storage.delete(old_photo.name)
             return Response(serializer.data)
         return Response(serializer.errors, status=status.HTTP_400_BAD_REQUEST)
 

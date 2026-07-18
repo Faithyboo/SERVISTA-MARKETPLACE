@@ -12,6 +12,7 @@ env/
 
 # Local media and logs
 media/
+staticfiles/
 *.log
 server.out.log
 server.err.log
@@ -34,4 +35,3 @@ yarn-error.*
 .DS_Store
 Thumbs.db
 .vscode/
-
