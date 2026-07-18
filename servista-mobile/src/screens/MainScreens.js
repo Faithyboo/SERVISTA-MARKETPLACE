@@ -359,16 +359,28 @@ export function ServiceDetailScreen({ route, navigation }) {
       setReviewableBooking(null);
       return;
     }
+
     api.get('/api/bookings/')
       .then(({ data }) => {
         const bookings = Array.isArray(data) ? data : [];
+
+        // Backend review eligibility is:
+        // - booking belongs to this provider
+        // - booking is reviewable when:
+        //   booking.status === 'completed' OR booking.client_confirmed_at OR booking.payment_status === 'released'
+        // - review must not already exist (serializer may not expose has_review reliably)
         const eligible = bookings
           .filter((booking) => (
             bookingBelongsToProvider(booking, service)
-            && !booking.has_review
-            && isSuccessfulBooking(booking)
+            && (
+              booking?.status === 'completed'
+              || !!booking?.client_confirmed_at
+              || booking?.payment_status === 'released'
+            )
+            && !booking?.has_review
           ))
           .sort((a, b) => new Date(b.created_at) - new Date(a.created_at))[0] || null;
+
         setReviewableBooking(eligible);
       })
       .catch(() => setReviewableBooking(null));
@@ -3563,22 +3575,10 @@ function AdminSentinelDashboard({ navigation }) {
 }
 
 export function AdminDashboardScreen({ navigation }) {
+  // Legacy admin dashboard implementation kept unreachable dead code.
+  // Use the DSS Admin Sentinel dashboard directly.
   return <AdminSentinelDashboard navigation={navigation} />;
-  const [users, setUsers] = useState([]);
-  const [kyc, setKyc] = useState([]);
-  const [refunds, setRefunds] = useState([]);
-  const [pinResets, setPinResets] = useState([]);
-  const [selectedRefund, setSelectedRefund] = useState(null);
-  const [dssData, setDssData] = useState(null);
-  const loadAdminData = useCallback(() => {
-    api.get('/api/users/admin/users/').then(({ data }) => setUsers(data)).catch(() => {});
-    api.get('/api/users/admin/kyc/').then(({ data }) => setKyc(data)).catch(() => {});
-    api.get('/api/bookings/admin/refunds/').then(({ data }) => setRefunds(data)).catch(() => {});
-    api.get('/api/wallet/admin/pin-resets/').then(({ data }) => setPinResets(data)).catch(() => {});
-  }, []);
-  useFocusEffect(useCallback(() => {
-    loadAdminData();
-  }, [loadAdminData]));
+
   const updateRefund = async (booking, decision) => {
     try {
       await api.put(`/api/bookings/admin/refunds/${booking.id}/`, { status: decision });

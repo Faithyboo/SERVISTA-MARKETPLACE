@@ -1,5 +1,7 @@
 import { Ionicons } from '@expo/vector-icons';
-import { useState } from 'react';
+import * as Google from 'expo-auth-session/providers/google';
+import * as WebBrowser from 'expo-web-browser';
+import { useEffect, useRef, useState } from 'react';
 import { Alert, Image, KeyboardAvoidingView, Platform, ScrollView, StyleSheet, Text as RNText, TouchableOpacity, View } from 'react-native';
 import { SafeAreaView } from 'react-native-safe-area-context';
 import { Button, Input, Logo } from '../components/ui';
@@ -9,6 +11,8 @@ import { colors } from '../theme/colors';
 import { withFont } from '../theme/typography';
 
 const servistaLogo = require('../../assets/servista-logo.png');
+
+WebBrowser.maybeCompleteAuthSession();
 
 function Text({ children, ...props }) {
   const { tn } = useLanguage();
@@ -22,6 +26,49 @@ export function SplashScreen() {
       <Logo dark />
       <Text style={styles.tagline}>Reliable Pros for Every Need</Text>
     </SafeAreaView>
+  );
+}
+
+function GoogleSignInButton({ onTwoFactor }) {
+  const { loginWithGoogle } = useAuth();
+  const { t } = useLanguage();
+  const [loading, setLoading] = useState(false);
+  const handledToken = useRef(null);
+  const googleClientId = Platform.select({
+    android: process.env.EXPO_PUBLIC_GOOGLE_ANDROID_CLIENT_ID,
+    ios: process.env.EXPO_PUBLIC_GOOGLE_IOS_CLIENT_ID,
+    default: process.env.EXPO_PUBLIC_GOOGLE_WEB_CLIENT_ID,
+  });
+  const [request, response, promptAsync] = Google.useAuthRequest({
+    clientId: googleClientId || 'missing-google-client-id',
+    selectAccount: true,
+  });
+
+  useEffect(() => {
+    const idToken = response?.params?.id_token;
+    if (response?.type !== 'success' || !idToken || handledToken.current === idToken) return;
+    handledToken.current = idToken;
+    setLoading(true);
+    loginWithGoogle(idToken)
+      .then((result) => {
+        if (result?.requires_2fa) onTwoFactor(result);
+      })
+      .finally(() => setLoading(false));
+  }, [response, loginWithGoogle, onTwoFactor]);
+
+  const signIn = async () => {
+    if (!googleClientId) {
+      Alert.alert('Google sign-in unavailable', 'Add the Google OAuth client IDs, then restart Expo.');
+      return;
+    }
+    await promptAsync();
+  };
+
+  return (
+    <TouchableOpacity activeOpacity={0.8} disabled={loading} onPress={signIn} style={styles.googleButton}>
+      <Text style={styles.googleMark}>{loading ? '…' : 'G'}</Text>
+      <Text style={styles.googleText}>{t('Continue with Google')}</Text>
+    </TouchableOpacity>
   );
 }
 
@@ -52,13 +99,13 @@ export function LoginScreen({ navigation }) {
   };
 
   const submitCode = async () => {
-    if (!verificationCode.trim() || verificationCode.trim().length !== 6) {
+    if (verificationCode.length !== 6) {
       setFormError(t('Enter the 6 digit code sent to your email.'));
       return;
     }
     setFormError('');
     setLoading(true);
-    const result = await verifyEmailCode(challenge.challenge_id, verificationCode.trim());
+    const result = await verifyEmailCode(challenge.challenge_id, verificationCode);
     if (result?.error) setFormError(result.error);
     setLoading(false);
   };
@@ -75,23 +122,10 @@ export function LoginScreen({ navigation }) {
             <View style={styles.loginForm}>
               <Text style={styles.twoFactorText}>We sent a 6 digit verification code to {challenge.email}. Enter it to finish signing in.</Text>
               <Text style={styles.loginLabel}>VERIFICATION CODE</Text>
-              <Input
-                placeholder="000000"
-                keyboardType="number-pad"
-                value={verificationCode}
-                onChangeText={(value) => setVerificationCode(value.replace(/\D/g, '').slice(0, 6))}
-                style={styles.loginInput}
-              />
-              {formError ? (
-                <View style={styles.loginErrorBox}>
-                  <Ionicons name="alert-circle-outline" size={18} color={colors.danger} />
-                  <Text style={styles.loginErrorText}>{formError}</Text>
-                </View>
-              ) : null}
+              <Input placeholder="000000" keyboardType="number-pad" value={verificationCode} onChangeText={(value) => setVerificationCode(value.replace(/\D/g, '').slice(0, 6))} style={styles.loginInput} />
+              {formError ? <View style={styles.loginErrorBox}><Ionicons name="alert-circle-outline" size={18} color={colors.danger} /><Text style={styles.loginErrorText}>{formError}</Text></View> : null}
               <Button label="Verify Email" icon="shield-checkmark-outline" loading={loading} onPress={submitCode} />
-              <TouchableOpacity activeOpacity={0.8} onPress={() => { setChallenge(null); setVerificationCode(''); }} style={styles.googleButton}>
-                <Text style={styles.googleText}>Use another email</Text>
-              </TouchableOpacity>
+              <TouchableOpacity activeOpacity={0.8} onPress={() => { setChallenge(null); setVerificationCode(''); setFormError(''); }} style={styles.googleButton}><Text style={styles.googleText}>Use another email</Text></TouchableOpacity>
             </View>
             ) : (
             <View style={styles.loginForm}>
@@ -121,13 +155,13 @@ export function LoginScreen({ navigation }) {
 
               <Button label="Sign In" icon="arrow-forward" loading={loading} onPress={submit} />
 
-              <TouchableOpacity activeOpacity={0.8} onPress={() => Alert.alert(t('Coming Soon'))} style={styles.googleButton}>
-                <Text style={styles.googleMark}>G</Text>
-                <Text style={styles.googleText}>Continue with Google</Text>
-              </TouchableOpacity>
+              <GoogleSignInButton onTwoFactor={(result) => {
+                setChallenge(result);
+                setVerificationCode('');
+                setFormError('');
+              }} />
             </View>
             )}
-
             {!challenge ? <TouchableOpacity activeOpacity={0.8} onPress={() => navigation.navigate('Register')}>
               <Text style={styles.loginBottomText}>New here? <Text style={styles.orangeUnderline}>Create account</Text></Text>
             </TouchableOpacity> : <View />}
@@ -183,12 +217,12 @@ export function RegisterScreen({ navigation }) {
   };
 
   const submitCode = async () => {
-    if (!verificationCode.trim() || verificationCode.trim().length !== 6) {
+    if (verificationCode.length !== 6) {
       Alert.alert(t('Verification code required'), t('Enter the 6 digit code sent to your email.'));
       return;
     }
     setLoading(true);
-    await verifyEmailCode(challenge.challenge_id, verificationCode.trim());
+    await verifyEmailCode(challenge.challenge_id, verificationCode);
     setLoading(false);
   };
 
@@ -205,17 +239,9 @@ export function RegisterScreen({ navigation }) {
             {challenge ? (
               <>
                 <Text style={styles.twoFactorText}>We sent a 6 digit verification code to {challenge.email}. This confirms your account email is real.</Text>
-                <Input
-                  placeholder="000000"
-                  keyboardType="number-pad"
-                  value={verificationCode}
-                  onChangeText={(value) => setVerificationCode(value.replace(/\D/g, '').slice(0, 6))}
-                  style={styles.signupInput}
-                />
+                <Input placeholder="000000" keyboardType="number-pad" value={verificationCode} onChangeText={(value) => setVerificationCode(value.replace(/\D/g, '').slice(0, 6))} style={styles.signupInput} />
                 <Button label="Verify Email" icon="shield-checkmark-outline" loading={loading} onPress={submitCode} />
-                <TouchableOpacity activeOpacity={0.8} onPress={() => setChallenge(null)}>
-                  <Text style={styles.signupBottomText}>Use a different email</Text>
-                </TouchableOpacity>
+                <TouchableOpacity activeOpacity={0.8} onPress={() => setChallenge(null)}><Text style={styles.signupBottomText}>Use a different email</Text></TouchableOpacity>
               </>
             ) : (
             <>

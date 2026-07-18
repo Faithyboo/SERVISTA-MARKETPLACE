@@ -60,6 +60,7 @@ class EmailVerificationCode(models.Model):
     code_hash = models.CharField(max_length=128)
     code_fingerprint = models.CharField(max_length=64, unique=True, db_index=True, null=True, blank=True)
     purpose = models.CharField(max_length=20, choices=PURPOSE_CHOICES)
+    failed_attempts = models.PositiveSmallIntegerField(default=0)
     is_used = models.BooleanField(default=False)
     expires_at = models.DateTimeField()
     created_at = models.DateTimeField(auto_now_add=True)

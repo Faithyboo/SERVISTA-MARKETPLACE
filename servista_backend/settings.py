@@ -90,7 +90,7 @@ DATABASES = {
         'ENGINE': 'django.db.backends.postgresql',
         'NAME': 'servista_db',
         'USER': 'postgres',
-        'PASSWORD': 'servista123',
+        'PASSWORD': 'root',
         'HOST': 'localhost',
         'PORT': '5432',
     }
@@ -156,6 +156,11 @@ MEDIA_ROOT = BASE_DIR / 'media'
 
 EMAIL_HOST_USER = os.environ.get('EMAIL_HOST_USER', '')
 EMAIL_HOST_PASSWORD = os.environ.get('EMAIL_HOST_PASSWORD', '')
+GOOGLE_OAUTH_CLIENT_IDS = [
+    client_id.strip()
+    for client_id in os.environ.get('GOOGLE_OAUTH_CLIENT_IDS', '').split(',')
+    if client_id.strip()
+]
 
 if EMAIL_HOST_USER and EMAIL_HOST_PASSWORD:
     EMAIL_BACKEND = 'django.core.mail.backends.smtp.EmailBackend'

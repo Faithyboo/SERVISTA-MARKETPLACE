@@ -1,7 +1,14 @@
 $ErrorActionPreference = "Stop"
 
 $root = Split-Path -Parent $MyInvocation.MyCommand.Path
+# Always use this repository's environment. An activated terminal environment may
+# belong to a different project and can omit this app's Django dependencies.
 $python = Join-Path $root "venv\Scripts\python.exe"
+
+if (-not (Test-Path -LiteralPath $python)) {
+  throw "Project virtual environment not found at $python. Run: py -3.14 -m venv venv; .\venv\Scripts\python.exe -m pip install -r requirements.txt"
+}
+
 $mobile = Join-Path $root "servista-mobile"
 $ipAddress = (
   Get-NetIPAddress -AddressFamily IPv4 |

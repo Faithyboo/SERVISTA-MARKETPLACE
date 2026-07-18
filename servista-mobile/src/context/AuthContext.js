@@ -120,12 +120,24 @@ export function AuthProvider({ children }) {
     }
   };
 
+  const loginWithGoogle = async (idToken) => {
+    try {
+      const response = await api.post('/api/users/google-login/', { id_token: idToken });
+      await saveSession(response.data);
+      return response.data.user;
+    } catch (error) {
+      const message = errorMessage(error);
+      Alert.alert('Google sign-in failed', message);
+      return { error: message };
+    }
+  };
+
   const logout = async () => {
     await AsyncStorage.multiRemove(['access_token', 'refresh_token', 'user', SESSION_LAST_ACTIVE_KEY]);
     setUser(null);
   };
 
-  const value = useMemo(() => ({ user, booting, login, register, verifyEmailCode, logout, setUser, updateUser }), [user, booting]);
+  const value = useMemo(() => ({ user, booting, login, register, verifyEmailCode, loginWithGoogle, logout, setUser, updateUser }), [user, booting]);
 
   return <AuthContext.Provider value={value}>{children}</AuthContext.Provider>;
 }

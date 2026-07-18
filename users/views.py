@@ -1,8 +1,8 @@
-import secrets
 import hashlib
 import os
-from decimal import Decimal
+import secrets
 from datetime import timedelta
+from decimal import Decimal
 
 from django.conf import settings
 from django.contrib.auth import authenticate
@@ -41,34 +41,45 @@ def issue_tokens(user):
     }
 
 
-def send_email_2fa_code(user, purpose):
-    EmailVerificationCode.objects.filter(user=user, purpose=purpose, is_used=False).update(is_used=True)
-    code = f'{secrets.randbelow(1000000):06d}'
-    code_fingerprint = hashlib.sha256(f'{settings.SECRET_KEY}:{code}'.encode()).hexdigest()
-    while EmailVerificationCode.objects.filter(code_fingerprint=code_fingerprint).exists():
-        code = f'{secrets.randbelow(1000000):06d}'
-        code_fingerprint = hashlib.sha256(f'{settings.SECRET_KEY}:{code}'.encode()).hexdigest()
+def start_email_verification(user, purpose):
+    """Create a short-lived, single-use email challenge without storing its plain code."""
+    EmailVerificationCode.objects.filter(
+        user=user, purpose=purpose, is_used=False
+    ).update(is_used=True)
+
+    # A fingerprint lets us guarantee that an active code cannot be shared by
+    # two challenges while the password hash protects the code at rest.
+    while True:
+        code = f'{secrets.randbelow(1_000_000):06d}'
+        fingerprint = hashlib.sha256(
+            f'{settings.SECRET_KEY}:{code}'.encode('utf-8')
+        ).hexdigest()
+        if not EmailVerificationCode.objects.filter(code_fingerprint=fingerprint).exists():
+            break
+
     challenge = EmailVerificationCode.objects.create(
         user=user,
         code_hash=make_password(code),
-        code_fingerprint=code_fingerprint,
+        code_fingerprint=fingerprint,
         purpose=purpose,
         expires_at=timezone.now() + timedelta(minutes=10),
     )
     send_mail(
         subject='Your Servista verification code',
-        message=f'Your Servista verification code is {code}. It expires in 10 minutes.',
-        from_email=getattr(settings, 'DEFAULT_FROM_EMAIL', 'no-reply@servista.local'),
+        message=(
+            f'Your Servista verification code is {code}. '
+            'It expires in 10 minutes. If you did not request this, ignore this email.'
+        ),
+        from_email=settings.DEFAULT_FROM_EMAIL,
         recipient_list=[user.email],
-        fail_silently=True,
+        fail_silently=False,
     )
-    data = {
+    return {
         'requires_2fa': True,
         'challenge_id': str(challenge.challenge_id),
         'email': user.email,
         'message': 'A 6 digit verification code has been sent to your email.',
     }
-    return data
 
 
 def get_badge_dss_stats(user):
@@ -109,7 +120,14 @@ class RegisterView(APIView):
         serializer = RegisterSerializer(data=request.data)
         if serializer.is_valid():
             user = serializer.save()
-            return Response(send_email_2fa_code(user, 'register'), status=status.HTTP_201_CREATED)
+            try:
+                return Response(start_email_verification(user, 'register'), status=status.HTTP_201_CREATED)
+            except Exception:
+                user.delete()
+                return Response(
+                    {'error': 'We could not send a verification email. Please try again.'},
+                    status=status.HTTP_503_SERVICE_UNAVAILABLE,
+                )
         return Response(serializer.errors, status=status.HTTP_400_BAD_REQUEST)
 
 
@@ -121,9 +139,13 @@ class LoginView(APIView):
         password = request.data.get('password')
         user = authenticate(request, email=email, password=password)
         if user:
-            if user.role == 'admin':
-                return Response(issue_tokens(user))
-            return Response(send_email_2fa_code(user, 'login'))
+            try:
+                return Response(start_email_verification(user, 'login'))
+            except Exception:
+                return Response(
+                    {'error': 'We could not send a verification email. Please try again.'},
+                    status=status.HTTP_503_SERVICE_UNAVAILABLE,
+                )
         return Response({'error': 'Invalid email or password'}, status=status.HTTP_401_UNAUTHORIZED)
 
 
@@ -133,21 +155,101 @@ class VerifyEmailCodeView(APIView):
     def post(self, request):
         challenge_id = request.data.get('challenge_id')
         code = str(request.data.get('code', '')).strip()
-        if not challenge_id or not code:
-            return Response({'error': 'Verification challenge and code are required'}, status=status.HTTP_400_BAD_REQUEST)
+        if not challenge_id or not (code.isdigit() and len(code) == 6):
+            return Response(
+                {'error': 'Enter the 6 digit verification code.'},
+                status=status.HTTP_400_BAD_REQUEST,
+            )
+
         try:
-            challenge = EmailVerificationCode.objects.select_related('user').get(challenge_id=challenge_id, is_used=False)
-        except EmailVerificationCode.DoesNotExist:
-            return Response({'error': 'Invalid or expired verification challenge'}, status=status.HTTP_400_BAD_REQUEST)
+            challenge = EmailVerificationCode.objects.select_related('user').get(
+                challenge_id=challenge_id, is_used=False
+            )
+        except (EmailVerificationCode.DoesNotExist, ValueError):
+            return Response(
+                {'error': 'This verification request is invalid or has already been used.'},
+                status=status.HTTP_400_BAD_REQUEST,
+            )
+
         if challenge.is_expired:
             challenge.is_used = True
             challenge.save(update_fields=['is_used'])
-            return Response({'error': 'Verification code has expired. Please sign in again.'}, status=status.HTTP_400_BAD_REQUEST)
+            return Response(
+                {'error': 'This verification code has expired. Please sign in again.'},
+                status=status.HTTP_400_BAD_REQUEST,
+            )
         if not check_password(code, challenge.code_hash):
-            return Response({'error': 'Invalid verification code'}, status=status.HTTP_400_BAD_REQUEST)
+            challenge.failed_attempts += 1
+            if challenge.failed_attempts >= 5:
+                challenge.is_used = True
+            challenge.save(update_fields=['failed_attempts', 'is_used'])
+            if challenge.is_used:
+                return Response(
+                    {'error': 'Too many invalid codes. Please sign in again to receive a new code.'},
+                    status=status.HTTP_400_BAD_REQUEST,
+                )
+            return Response({'error': 'Invalid verification code.'}, status=status.HTTP_400_BAD_REQUEST)
+
         challenge.is_used = True
         challenge.save(update_fields=['is_used'])
+        if not challenge.user.is_active:
+            return Response({'error': 'This account has been disabled.'}, status=status.HTTP_403_FORBIDDEN)
         return Response(issue_tokens(challenge.user))
+
+
+class GoogleLoginView(APIView):
+    """Exchange a verified Google ID token for a Servista session."""
+    permission_classes = [AllowAny]
+
+    def post(self, request):
+        token = request.data.get('id_token')
+        if not token:
+            return Response({'error': 'Google ID token is required'}, status=status.HTTP_400_BAD_REQUEST)
+        if not settings.GOOGLE_OAUTH_CLIENT_IDS:
+            return Response(
+                {'error': 'Google sign-in has not been configured on the server.'},
+                status=status.HTTP_503_SERVICE_UNAVAILABLE,
+            )
+
+        try:
+            from google.auth.transport import requests as google_requests
+            from google.oauth2 import id_token as google_id_token
+
+            identity = google_id_token.verify_oauth2_token(token, google_requests.Request())
+        except ImportError:
+            return Response(
+                {'error': 'Google sign-in dependency is missing. Install google-auth.'},
+                status=status.HTTP_503_SERVICE_UNAVAILABLE,
+            )
+        except ValueError:
+            return Response({'error': 'Invalid Google sign-in token'}, status=status.HTTP_401_UNAUTHORIZED)
+
+        if identity.get('aud') not in settings.GOOGLE_OAUTH_CLIENT_IDS:
+            return Response({'error': 'Google token was issued for a different application.'}, status=status.HTTP_401_UNAUTHORIZED)
+        if not identity.get('email_verified'):
+            return Response({'error': 'Your Google email address has not been verified.'}, status=status.HTTP_400_BAD_REQUEST)
+
+        email = identity.get('email')
+        if not email:
+            return Response({'error': 'Google did not provide an email address.'}, status=status.HTTP_400_BAD_REQUEST)
+
+        user = User.objects.filter(email__iexact=email).first()
+        if not user:
+            user = User.objects.create_user(
+                email=email,
+                full_name=identity.get('name') or email.split('@')[0],
+                password=None,
+                role='client',
+            )
+        if not user.is_active:
+            return Response({'error': 'This account has been disabled.'}, status=status.HTTP_403_FORBIDDEN)
+        try:
+            return Response(start_email_verification(user, 'login'))
+        except Exception:
+            return Response(
+                {'error': 'We could not send a verification email. Please try again.'},
+                status=status.HTTP_503_SERVICE_UNAVAILABLE,
+            )
 
 
 class ProfileView(APIView):

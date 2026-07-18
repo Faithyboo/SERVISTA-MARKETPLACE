@@ -3,18 +3,22 @@
     "name": "Servista",
     "slug": "servista-mobile",
     "version": "1.0.0",
+    "scheme": "servista",
     "orientation": "portrait",
     "userInterfaceStyle": "light",
     "ios": {
+      "bundleIdentifier": "com.servista.app",
       "supportsTablet": true
     },
     "android": {
+      "package": "com.servista.app",
       "adaptiveIcon": {
         "backgroundColor": "#0F172A"
       }
     },
     "plugins": [
-      "expo-font"
+      "expo-font",
+      "expo-web-browser"
     ]
   }
 }
